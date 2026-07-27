@@ -18,6 +18,11 @@ yarn-error.log*
 data/
 output/
 downloads/
+# Persistent browser profile — holds the CAPTCHA-cleared session. Never commit.
+.browser_profile/
+probe_out/
+probe_out2/
+debug/
 *.sqlite
 *.db
 .cache/
