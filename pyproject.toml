@@ -1,0 +1,81 @@
+[project]
+name = "county-crawler"
+version = "0.1.0"
+description = "San Joaquin County foreclosure tracker — trustee's sale notices and auction comps from the recorder's Tyler Eagle portal"
+requires-python = ">=3.10"
+dependencies = [
+    "playwright",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+    "pre-commit",
+]
+
+[build-system]
+requires      = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: Pure logic — parsers, date windows, derivation views over an in-memory DB (fast, no I/O)",
+    "integration: Touches the filesystem or a real sqlite file, but never the network (medium)",
+    "live: Hits the live Tyler Eagle portal through Playwright. Needs a CAPTCHA-cleared ./.browser_profile and a human (slow, rate-limited, excluded by default)",
+]
+# `live` is excluded by default for the same reason MVP.md §10 keeps requests
+# serial: every live test is a real request to a county server behind a
+# reCAPTCHA. A test run must never become a crawl.
+addopts = "-m 'not live' --tb=short"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "RUF",   # ruff-specific rules
+]
+ignore = [
+    "E501",   # line too long — the formatter owns this
+    "E741",   # ambiguous name (l) — the line-oriented parsers use `l` throughout
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["collect_sjc", "probe_eagle", "scripts"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_configs = true
+disallow_untyped_defs = false
+# Deliberately off. This codebase is essentially unannotated, and with
+# check_untyped_defs on mypy reports 17 var-annotated complaints about dict and
+# list literals inside untyped functions — none of them bugs. A gate that emits
+# 17 lines everyone learns to ignore is worse than a narrow one that is always
+# clean. Annotating the parsers to satisfy it would be a large diff across the
+# code with the least ground truth to catch a mistake (AI_CONTEXT.md rule 10).
+# Turn this on as annotations are added, module by module, via an override.
+check_untyped_defs = false
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*", "probe_eagle.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true

@@ -1,0 +1,29 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-added-large-files
+        args: ['--maxkb=2000']
+      # sjc.db is gitignored, but a stray copy under another name would be a
+      # licensing and volume problem, not just a size one.
+      - id: check-merge-conflict
+
+  - repo: local
+    hooks:
+      - id: pytest-fast
+        name: pytest (excludes live)
+        entry: pytest -m "not live"
+        language: system
+        pass_filenames: false
+        always_run: true

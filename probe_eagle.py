@@ -40,14 +40,15 @@ PROFILE = Path("./.browser_profile").resolve()
 PATTERNS = {
     "NOTS": re.compile(r"(NOT.{0,3}CE.{0,3}(OF.{0,3})?TRUSTEE|TRUSTEE.{0,3}S?.{0,3}SALE|\bNTS\b|\bNOS\b)", re.I),
     "TDUS": re.compile(r"(TRUSTEE.{0,3}S?.{0,3}DEED|\bTDUS\b|\bTDS\b|DEED.{0,10}UPON.{0,3}SALE)", re.I),
-    "NOD":  re.compile(r"(NOT.{0,3}CE.{0,3}(OF.{0,3})?DEFAULT|\bNOD\b)", re.I),
+    "NOD": re.compile(r"(NOT.{0,3}CE.{0,3}(OF.{0,3})?DEFAULT|\bNOD\b)", re.I),
     "RESCIND": re.compile(r"(RESCI|CANCEL|REVOK|WITHDRAW)", re.I),
 }
 APN_HEADER = re.compile(r"(\bAPN\b|PARCEL|ASSESSOR)", re.I)
 APN_VALUE = re.compile(r"\b\d{3}-\d{3}-\d{2,3}(-\d{3})?\b")
 
 
-def log(m): print(f"[probe] {m}", flush=True)
+def log(m):
+    print(f"[probe] {m}", flush=True)
 
 
 def snap(page, name):
@@ -123,18 +124,20 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--headed", action="store_true")
     ap.add_argument("--slow", action="store_true")
-    ap.add_argument("--manual-nav", action="store_true",
-                    help="pause and let a human drive to the right page")
+    ap.add_argument("--manual-nav", action="store_true", help="pause and let a human drive to the right page")
     ap.add_argument("--chrome", action="store_true", help="use installed Chrome")
     args = ap.parse_args()
     OUT.mkdir(exist_ok=True)
     calls = []
 
     with sync_playwright() as p:
-        kw = dict(user_data_dir=str(PROFILE), headless=not args.headed,
-                  slow_mo=400 if args.slow else 0,
-                  record_har_path=str(OUT / "network.har"),
-                  viewport={"width": 1500, "height": 1000})
+        kw = dict(
+            user_data_dir=str(PROFILE),
+            headless=not args.headed,
+            slow_mo=400 if args.slow else 0,
+            record_har_path=str(OUT / "network.har"),
+            viewport={"width": 1500, "height": 1000},
+        )
         if args.chrome:
             kw["channel"] = "chrome"
         ctx = p.chromium.launch_persistent_context(**kw)
@@ -158,8 +161,9 @@ def main():
             except Exception:
                 return
             if re.search(r"trustee|parcel|\bAPN\b", t, re.I):
-                calls.append({"dir": "resp", "url": r.url, "status": r.status,
-                              "body": t, "FLAG": "matched trustee/parcel/APN"})
+                calls.append(
+                    {"dir": "resp", "url": r.url, "status": r.status, "body": t, "FLAG": "matched trustee/parcel/APN"}
+                )
                 log(f"  >> interesting XHR response: {r.url[:100]}")
 
         ctx.on("request", on_req)
@@ -173,7 +177,8 @@ def main():
         try:
             acc = page.get_by_text("I Accept", exact=False).first
             if acc.is_visible(timeout=4000):
-                acc.click(); page.wait_for_timeout(3000)
+                acc.click()
+                page.wait_for_timeout(3000)
                 log("  accepted disclaimer")
             else:
                 log("  no disclaimer (session persisted)")
@@ -203,7 +208,9 @@ def main():
         (OUT / "q1_matches.json").write_text(json.dumps(hits, indent=2))
         (OUT / "report.md").write_text(
             f"# Probe v2 — {date.today()}\n\n## Q1\n```json\n{json.dumps(hits, indent=2)}\n```\n"
-            f"\n## Q3\nVerdict: **{verdict}**\n", encoding="utf-8")
+            f"\n## Q3\nVerdict: **{verdict}**\n",
+            encoding="utf-8",
+        )
         ctx.close()
     log(f"done — {OUT.resolve()}")
 

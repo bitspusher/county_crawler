@@ -39,24 +39,42 @@ basic form), `collect_sjc.py` (the collector).
    TDUS, and `v_upcoming` selects NOTS with no exclusion join. §3 calls this a
    correctness requirement, not a feature — as it stands, Section A would publish
    auctions that will not happen.
-2. **No parser tests.** §6.2 states both parsers are unit-tested against captured
-   fixtures. There are no test files in the repo.
-3. **A result cap degrades into "zero rows."** `Portal.search` correctly raises on the
-   cap message (`collect_sjc.py:390`), but `main` catches that `RuntimeError`
-   (`:540`), finds `rows` empty, and falls through to the label-mode retry at `:545`.
-   §5.1 requires a cap be treated as an error, never as an empty result.
-4. **Zero rows warns but still commits.** The `!! ZERO ROWS` line is a log message; the
-   run continues and stores. `collect_sjc.py`'s own docstring says a zero-row result
-   where rows were expected is a loud failure.
-5. **`report()` is not the §7 output.** It is a useful dump, but there is no 7-day
-   window, no Section A / Section B split, and no export.
+2. ~~**No parser tests.**~~ **Partially closed.** There are now 109 tests, including
+   both parsers, `Portal.search` driven through a fake page, the derivation views over
+   an in-memory DB, and the date-window logic. But §6.2 asks for **captured** fixtures
+   and all five are hand-authored, so the parser tests are a regression lock rather
+   than a correctness check. See `tests/fixtures/README.md`;
+   `scripts/capture_fixtures.py --headed` closes the rest.
+3. ~~**A result cap degrades into "zero rows."**~~ **Closed.** `Portal.search` raises a
+   dedicated `ResultCapExceeded`, and `main` catches it *before* the generic
+   `RuntimeError` handler, records `RESULT_CAP` in `run_log`, stores nothing for that
+   window, and exits non-zero at the end of the run. The label-mode retry is
+   unreachable from a cap.
+4. ~~**Zero rows warns but still commits.**~~ **Closed.** An unexpected zero-row window
+   aborts the whole run with a diagnostic checklist and a non-zero exit. Aborting the
+   run rather than the window is deliberate: a dead session returns zero for *every*
+   window. `--allow-zero-rows` is the deliberate escape hatch.
+5. **`report()` is not the §7 output.** It is a useful dump — now including a `run_log`
+   coverage section — but there is no 7-day window, no Section A / Section B split, and
+   no export.
 6. **Nothing consumes parcel data (§5.2) or the AG §2924m dataset (§5.3).**
-7. **`page_no` is always 0.** `store_index(con, rows, 0, qs, qe)` at `:552` — pages are
-   walked but the per-page attribution is discarded.
-8. **`run_log` is never written.** The table is created in `SCHEMA` (`:99`) and nothing
-   ever inserts into it, so there is no record of which windows were collected when, or
-   which ones warned. That is the table that would let a reader distinguish "no
-   foreclosures that month" from "that month was never collected."
+7. ~~**`page_no` is always 0.**~~ **Closed.** `Portal.search` stamps each row with the
+   result page it came from and `store_index` reads it off the row. A row parsed outside
+   the pagination walk stores NULL rather than a misleading 0.
+8. ~~**`run_log` is never written.**~~ **Closed.** `run_log_start` opens a row *before*
+   the search runs and `run_log_finish` closes it with counts and a note, so an
+   interrupted window still leaves a record. A collected-but-empty window is a row with
+   `rows_indexed=0`; a never-collected window is the absence of a row.
+
+### New gap, found while closing the above
+
+9. **`doctype_vocab()`'s key orientation may be inverted.** It builds
+   `{it["value"]: it["name"]}`, but `main` then indexes the result by *label* to get an
+   id (`vocab[label]`), the way `KNOWN_IDS` is keyed. Only one reading can be right and
+   only the live JSON payload says which — so this is deliberately **not** "fixed"
+   blind. `scripts/probe_xhr.py` reports the actual item shape and calls it explicitly.
+   If inverted, `vocab[label]` raises `KeyError` and every search silently degrades to
+   label mode.
 
 ### Unresolved, per the spec itself
 
@@ -86,14 +104,22 @@ and neither waits on the automation issue.
 - [ ] **Resolve the automation issue.** Confirm whether `Portal.xhr` returns real JSON
       and result HTML. If not, switch to UI automation — fill, click Search, read the
       DOM, page through. ~30 records/month makes the slow path affordable. (§5.1, §11.1)
-- [ ] Make a result cap fatal for that window rather than falling through to the
+      **Run `python scripts/probe_xhr.py --headed`** — it drives the real `Portal` and
+      prints a verdict, plus dumps the raw responses to `debug/xhr_probe/`. Needs a human
+      to clear the CAPTCHA once. This is the only item here nobody else can do.
+- [x] Make a result cap fatal for that window rather than falling through to the
       label-mode retry. (Gap 3)
-- [ ] Make an unexpected zero-row window fail loudly instead of committing. (Gap 4)
-- [ ] Capture live-markup fixtures and put `parse_results` / `parse_detail` under test.
-      (§6.2, Gap 2)
-- [ ] Record the real `page_no`. (Gap 7)
-- [ ] Write `run_log` rows so collected windows are distinguishable from empty ones.
+- [x] Make an unexpected zero-row window fail loudly instead of committing. (Gap 4)
+- [x] Put `parse_results` / `parse_detail` under test. (Gap 2 — tests exist; the
+      fixtures are still synthetic, see below)
+- [ ] **Capture live-markup fixtures**, replacing the synthetic ones, so the parser
+      tests become a correctness check. `python scripts/capture_fixtures.py --headed`.
+      Expect failures on the first real capture — that is the signal. (§6.2, Gap 2)
+- [x] Record the real `page_no`. (Gap 7)
+- [x] Write `run_log` rows so collected windows are distinguishable from empty ones.
       (Gap 8)
+- [ ] Settle `doctype_vocab()`'s key orientation from the live payload. `probe_xhr.py`
+      reports it. (Gap 9)
 
 ## Phase 2 — validate the two derivations
 

@@ -12,6 +12,9 @@ SQLite dataset plus CLI reports — no service, no UI.
   address and no APN.
 - [ROADMAP.md](ROADMAP.md) — phased plan, and where the code currently stands against
   the spec.
+- [AI_CONTEXT.md](AI_CONTEXT.md) — hard rules for anyone, human or agent, writing code
+  here. Read before your first change.
+- [DEVELOPMENT.md](DEVELOPMENT.md) — test suite, the agent pipeline, and how to run both.
 
 ## Files
 
@@ -19,12 +22,19 @@ SQLite dataset plus CLI reports — no service, no UI.
 |---|---|
 | `collect_sjc.py` | The collector. Searches NOTS (doc type 41) and TDUS (22) by month, stores append-only observations in `sjc.db`, derives price and sale class in views. |
 | `probe_eagle.py` | The discovery probe that mapped the portal's endpoints and field names. Historical — it drives the S6 basic form; the collector uses S7. Kept for re-probing after a portal release. |
+| `scripts/probe_xhr.py` | Settles ROADMAP Phase 1's automation question: does `Portal.xhr` return real data or the app shell? Needs `--headed` and a human once. |
+| `scripts/capture_fixtures.py` | Replaces the synthetic test fixtures with live markup, so the parser tests become a correctness check rather than a regression lock. |
+| `scripts/collection_metrics.py` | Deterministic project-health numbers. Safe with no database. |
+| `tests/` | 109 tests, none of which touch the network by default. See DEVELOPMENT.md. |
 
 ## Quick start
 
 ```sh
 python -m venv .venv && source .venv/bin/activate
-pip install playwright && python -m playwright install chromium
+pip install -e '.[dev]' && python -m playwright install chromium
+
+# Answer the blocking question FIRST — everything downstream depends on it.
+python scripts/probe_xhr.py --headed
 
 python collect_sjc.py --start 2026-06-01 --end 2026-06-30 --headed   # clear the CAPTCHA once
 python collect_sjc.py --report                                       # read the DB, no network
@@ -49,6 +59,12 @@ updated in place. Query the views, not the tables:
 | `v_repeat_buyers` | Grantees ranked by purchase count — the customer list |
 | `v_latest_index`, `v_latest_detail` | Most recent observation per document |
 
+`run_log` is the other table worth knowing about. It records every
+(doc type, window) attempt, so the absence of documents for a month is
+distinguishable from that month never having been collected — and a window the
+server capped is marked incomplete rather than looking complete. `--report`
+prints a coverage section from it.
+
 Sale price is **derived, not recorded**: the index carries no price, so it is computed
 from the documentary transfer tax at $1.10/$1,000 (±$500). Two assumptions behind that
 number are still unvalidated — the Stockton charter-city rate, and the §11926 zero-tax
@@ -65,3 +81,9 @@ rather than a re-collection.
   sales that will not happen. ROADMAP.md Phase 3.
 - The recorder states the grantor/grantee index is a finding aid. Fine for a lead list,
   not for title work.
+- **Nothing has ever been collected.** There is no `sjc.db` in a fresh checkout, and
+  ROADMAP Phase 1's automation question is unanswered, so every claim about the live
+  data is a prediction. `python scripts/probe_xhr.py --headed` settles it.
+- **The test fixtures are synthetic.** The suite is a regression lock, not proof the
+  parsers handle the county's real markup. `tests/fixtures/README.md` explains why, and
+  `scripts/capture_fixtures.py` is how it gets fixed.
