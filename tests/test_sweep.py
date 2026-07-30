@@ -7,6 +7,7 @@ things standing between the dataset and 1016 Substitution Of Trustee records a
 month.
 """
 
+import itertools
 from datetime import date
 
 import pytest
@@ -51,7 +52,7 @@ def test_windows_never_overlap():
     §10 cares about.
     """
     got = list(windows(date(2026, 1, 1), date(2026, 3, 31), 3))
-    for (_, prev_end), (next_start, _) in zip(got, got[1:], strict=False):
+    for (_, prev_end), (next_start, _) in itertools.pairwise(got):
         assert next_start > prev_end
         assert (next_start - prev_end).days == 1
 
