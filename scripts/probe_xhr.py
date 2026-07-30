@@ -13,8 +13,13 @@ stores nothing in the database.
 
     python scripts/probe_xhr.py --headed
 
-Exit status: 0 if the XHR path works, 1 if it does not (i.e. the UI-automation
-fallback is required), 2 if the probe could not run at all.
+Exit status (updated after the 2026-07-29 settlement):
+  0 — healthy. Either the full pass (transport works AND the doc-type filter is
+      honored), or the SETTLED state: transport works and the filter is
+      server-ignored, which is the architecture collection now runs on.
+  1 — the transport itself is broken (POST rejected, no grid markup): a real
+      regression. THIS is the exit that means the portal changed.
+  2 — the probe could not run at all.
 """
 
 import argparse
@@ -422,6 +427,9 @@ def main():
         say("  run one TDUS month with details for Phase 2.")
     elif transport_works and results.get("rows") is False:
         say("VERDICT: the transport WORKS; the doc-type FILTER does not.")
+        say("  This is the SETTLED, healthy state (2026-07-29) — collection runs")
+        say("  unfiltered sweeps with client-side selection, so nothing has")
+        say("  regressed. Exit 0.")
         say("  searchResults returns real, parseable grid markup and pagination")
         say("  terminates cleanly, so no UI-automation rewrite is needed. What fails")
         say("  is narrower: the doc-type field is dropped, so the search is")
@@ -453,7 +461,9 @@ def main():
         say("\nALSO: doctype_vocab()'s key orientation is wrong for main()'s usage.")
         say("  Fix that regardless of the verdict above — see check 2.")
     say("=" * 72)
-    return 0 if ok else 1
+    if ok or (transport_works and results.get("rows") is False):
+        return 0
+    return 1
 
 
 if __name__ == "__main__":

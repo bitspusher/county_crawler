@@ -9,6 +9,19 @@ the `## Files` list mechanically before a human-equivalent judgment is applied.
 
 ---
 
+## Roadmap item — REQUIRED
+
+Every spec cites the roadmap item it implements, with its tag quoted:
+
+```markdown
+**Roadmap item:** Phase 4 — CSV export (`[pipeline]`)
+```
+
+A spec citing a `[human]`-tagged item must not be written, let alone
+dispatched — those items need a headed browser, a phone call, or the founder's
+judgment. This requirement is currently enforced by the architect's
+instructions and post-review, not mechanically.
+
 ## Status line
 
 Include an explicit status line at the top. Valid values:

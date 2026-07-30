@@ -113,6 +113,11 @@ agent's prose about what it did is not.
 - Do not approve Phase N+1 work while Phase N is unmerged. Phase 0 items are
   phone calls and public-records requests — they are not yours to spec, and you
   should say so if a finding proposes automating them.
+- **Honor the roadmap's item tags.** `[human]` items need a headed browser, a
+  phone call, or the founder's judgment — never write a spec for one, whatever
+  files it would touch. Every spec you write must cite the roadmap item it
+  implements and quote its tag; a spec that cannot cite a `[pipeline]` item is
+  a spec you should not be writing.
 - If a finding appears in `reviews/dismissed-findings.md`, skip it. When you
   dismiss something new, append one line there:
   `- YYYY-MM-DD: <description> — <reason>`.

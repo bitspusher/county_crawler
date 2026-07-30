@@ -19,7 +19,10 @@ field order.)*
 **Item tags:** `[human]` = needs a headed browser with a human-cleared CAPTCHA,
 a phone call, or a judgment only the founder can make — the agent pipeline must
 not spec these. `[pipeline]` = implementable by the spec pipeline within its
-file boundaries.
+file boundaries. *Enforcement is currently prompt-only (the architect agent's
+instructions plus SPEC_TEMPLATE's roadmap-item citation requirement); nothing
+mechanical rejects a spec against a `[human]` item yet — which is why it is an
+enabling condition for the parked pipeline below.*
 
 ---
 
@@ -131,25 +134,31 @@ basic form), `collect_sjc.py` (the collector).
 
 ## Phase 0 — no code required
 
-Both items are §11 steps 4 and 6: the best ratio of information gained to effort spent,
-and neither waits on the automation issue.
+Six items, none needing code — the two §11 steps (4 and 6) with the best ratio
+of information gained to effort spent, plus the two hypothesis tests the
+2026-07-29 review found missing and the two legal checks. Nothing here waits on
+anything.
 
 - [ ] `[human]` **Call the Recorder about bulk data** (209-468-3939). Could obsolete
       the whole portal path and the parcel bridge at once. CPRA under Gov. Code
-      §6253.9 if no product exists. (§10, §11.6)
+      §6253.9 if no product exists. (§10; §11 step 6)
 - [ ] `[human]` **Start repeat-buyer analysis from the AG §2924m dataset.** Winning
       bidder names, no scraping. Answers "who would I even call" today.
-      (§5.3, §8, §11.4)
+      (§5.3, §8; §11 step 4)
 - [ ] `[human]` **Ask 2–3 repeat buyers whether identifier-less comps are worth
       paying for.** The AG dataset names them. Hypothesis 3 (§2) is the
       load-bearing question and it is answerable by conversation, not code —
       gate Phase 4/5 effort on the answer. *(Added 2026-07-29 review: no
       roadmap item tested this.)*
-- [ ] `[human]` **Test the freshness hypothesis** (§2 hypothesis 1): for one week
-      of June's already-collected NOTS, record when PropStream or
-      Foreclosure.com first listed the same notices, and the lag. No code —
-      the recording dates are already in `sjc.db`. *(Added 2026-07-29 review:
-      the headline differentiator had zero evidence and no item.)*
+- [ ] `[human]` **Test the freshness hypothesis** (§2 hypothesis 1) —
+      **forward-looking by design**: at the next collection run, take that
+      week's fresh NOTS and check PropStream/Foreclosure.com for each on days
+      1, 3, and 7, logging first-seen dates as you go. Retro-checking June only
+      works if an aggregator displays an explicit listed-on date, and any retro
+      sample excludes already-delisted notices (survivorship bias) — say so if
+      used. Needs aggregator access (account/trial); budget that first.
+      *(Added 2026-07-29 review; redesigned same day — first-listing dates are
+      not observable two months later.)*
 - [ ] `[human]` Review the portal terms, including the indemnification clause.
       (§10) **Gates Phase 4's backfill and any recurring cadence** — see
       Phase 4.
@@ -177,11 +186,11 @@ and neither waits on the automation issue.
 - [x] Record the real `page_no`. (Gap 7)
 - [x] Write `run_log` rows so collected windows are distinguishable from empty ones.
       (Gap 8)
-- [ ] `[human]` Settle `doctype_vocab()`'s key orientation opportunistically on
-      the next headed probe run — **cosmetic since the sweep rewrite**: `main`
-      calls `portal.search(None, ...)` and never consults the vocabulary for a
-      query, so the orientation affects only the rename-detection log line.
-      (Gap 9, downgraded)
+- [x] ~~Settle `doctype_vocab()`'s key orientation~~ **Dropped as moot
+      (2026-07-29 round 2):** the vocabulary endpoint always serves the app
+      shell, so the probe's orientation check can never run — and the fallback
+      it always takes, `KNOWN_IDS`, is `{label: id}`, which is exactly how
+      `main` indexes it. There is nothing left to settle. (Gap 9)
 
 ## Phase 2 — validate the two derivations
 
@@ -198,12 +207,15 @@ and neither waits on the automation issue.
       several individuals — names live in `sjc.db`, not here, per AI_CONTEXT.md
       rule 11). `sale_class` stays as-is. One month is support, not proof, and
       nothing later in the plan re-checks the split, so: (§6.5, §8)
-      - [ ] `[pipeline]` Add a watch to `--report`: flag any $0-tax record whose
-            grantee fails an institutional-name pattern, so exceptions
-            accumulate visibly rather than being a one-time footnote. First
-            known case: doc 2026-055108, a trust/individual-shaped grantee at
-            $0.00 — plausibly a private lender credit-bidding, which the split
-            still classifies correctly.
+      - [ ] Add a watch to `--report`: flag any $0-tax record whose grantee is
+            NOT on an accumulating allowlist of previously-confirmed
+            institutional grantees. Not a name-shape classifier — June's own
+            data defeats one (a partners-LP sits on the lender list; a trust
+            sits off it). `[human]` seeds and extends the allowlist from
+            confirmed cases; `[pipeline]` implements the mechanical flagging
+            (the list lives next to `KEEP_DOCTYPES`). Doc 2026-055108 is
+            EXPECTED to flag — the watch surfaces exceptions, it does not
+            reclassify them.
 - [ ] **Rate SUPPORTED but unverified for Stockton — the original check refuted
       the wrong direction.** All 10 derived prices land on exact $500
       boundaries, consistent with §6.4's rounding rule at $1.10/$1,000. That
@@ -248,8 +260,9 @@ MVP answer.
 - [ ] `[pipeline]` Join them out of `v_upcoming` once the key is known. Schema
       catch for the implementing spec: `CREATE TABLE IF NOT EXISTS` will not add
       a column to an existing `sjc.db` — an `ALTER TABLE` path is required.
-- [ ] **If the fallback key (party + recording sequence) is ever needed, its
-      prerequisites come first:** Gap 10's trustee/homeowner separation (at
+- [ ] `[pipeline]` **If the fallback key (party + recording sequence) is ever
+      needed, its prerequisites come first** (and the prerequisites themselves
+      are `[human]`-gated where they need ground truth): Gap 10's trustee/homeowner separation (at
       minimum the known-trustee name list, matching on non-trustee names only)
       and a named ground-truth source for the stated error rate (a hand-verified
       sample against detail views, or the AG §2924m dataset). One trustee firm
@@ -306,9 +319,11 @@ Kept here so they are not drifted into. Full reasoning in §9.
 - **The agent pipeline** (`.claude/agents/`, `scripts/*-review.sh`,
   `implement.sh`, `crontab.txt`) — built 2026-07-29, deliberately NOT
   scheduled. Cron stays uninstalled until (a) the Phase 0 items are done,
-  (b) the boundary validator's protected-path deny-list is in place, and
-  (c) the roadmap carries enough `[pipeline]`-tagged work to fill slots without
-  the architect inventing scope. Until then, run phases manually per-session.
+  (b) `[human]`-tag enforcement is more than prompt-only (the protected-path
+  deny-list shipped 2026-07-29 and is no longer a pending condition), and
+  (c) the roadmap carries at least 6 open `[pipeline]`-tagged items spanning
+  at least two phases — checkable against the checkboxes, so enablement cannot
+  self-certify. Until then, run phases manually per-session.
   *(2026-07-29 review: the machinery outsizes the stated MVP deliverable and
   lived entirely outside this priority document — recorded here so it is
   accounted for.)*

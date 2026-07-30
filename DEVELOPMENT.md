@@ -196,15 +196,11 @@ work, which on a codebase with no ground truth is actively harmful. Raise
 
 ### Before you enable it
 
-The pipeline will happily generate specs about code nobody knows works. Settle
-the blocking question first:
-
-```sh
-python scripts/probe_xhr.py --headed
-```
-
-Until that returns a verdict, Phase 2 is triaging findings about an unverified
-code path, and Phase 3 is implementing against it.
+The probe question this section originally named was settled 2026-07-29. The
+authoritative enable-gate is ROADMAP.md's "Deliberately parked" entry for the
+agent pipeline: (a) Phase 0 done, (b) `[human]`-tag enforcement beyond
+prompt-only, (c) at least 6 open `[pipeline]`-tagged roadmap items across two
+or more phases. All three must hold before the crontab is installed.
 
 ## Housekeeping
 

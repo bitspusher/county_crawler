@@ -42,11 +42,11 @@
 # the chain already completed the phase.
 #
 # ── Before enabling any of this ────────────────────────────────────────
-# The pipeline will happily generate specs against a project whose central
-# question is unanswered. Settle it first:
-#     python scripts/probe_xhr.py --headed
-# Until that returns a verdict, the architect is triaging findings about code
-# nobody knows works.
+# The probe question this gate originally named was SETTLED 2026-07-29. The
+# authoritative enable-gate is now ROADMAP.md's "Deliberately parked" entry for
+# the agent pipeline: (a) Phase 0 done, (b) [human]-tag enforcement beyond
+# prompt-only, (c) >=6 open [pipeline]-tagged items across >=2 phases. Do not
+# install this crontab until all three hold.
 
 # Cron runs with a minimal PATH. Commented out — see the warning above.
 # PATH=/home/san/.local/bin:/home/san/.nvm/versions/node/v25.9.0/bin:/usr/local/bin:/usr/bin:/bin
