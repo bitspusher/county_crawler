@@ -13,7 +13,8 @@ parse_detail work against San Joaquin County's actual markup.
 
     python scripts/capture_fixtures.py --headed
 
-Costs at most four requests. Stores nothing in the database.
+Costs ~25 requests at the 1.5s delay (1 POST + ~14 result pages for the
+3-day window + up to 8 detail fetches). Stores nothing in the database.
 """
 
 import argparse

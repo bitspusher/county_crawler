@@ -84,8 +84,9 @@ basic form), `collect_sjc.py` (the collector).
    id (`vocab[label]`), the way `KNOWN_IDS` is keyed. Only one reading can be right and
    only the live JSON payload says which — so this is deliberately **not** "fixed"
    blind. `scripts/probe_xhr.py` reports the actual item shape and calls it explicitly.
-   If inverted, `vocab[label]` raises `KeyError` and every search silently degrades to
-   label mode.
+   An inverted vocab now only produces a spurious "NOT IN VOCABULARY — county may have
+   renamed it" log line: `main` guards the index and the sweep never consults the
+   vocabulary for a query.
 
 ### New gaps, found by running it
 
