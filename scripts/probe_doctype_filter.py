@@ -98,6 +98,13 @@ def main():
     ap.add_argument(
         "--verify", action="store_true", help="fetch page 1 for the winning variant and show the doc-type mix"
     )
+    ap.add_argument(
+        "--manual",
+        action="store_true",
+        help="ALWAYS pause so you can fill the doc-type field in the real UI, then "
+        "read back exactly what the widget put in the form. This beats guessing: "
+        "whatever the autocomplete produces IS the accepted format.",
+    )
     args = ap.parse_args()
 
     if collect_sjc.sync_playwright is None:
@@ -163,6 +170,67 @@ def main():
         )
         dump("00_live_controls.json", json.dumps(sorted(set(live)), indent=2))
         say(f"\nlive form controls ({len(set(live))}): {sorted(set(live))}")
+
+        # ── Manual capture: let the widget tell us the format ────────────
+        # The pause is UNCONDITIONAL here. The CAPTCHA prompt earlier only fires
+        # when the disclaimer is actually present, so on an already-cleared
+        # profile the script blows straight past it and there is no opportunity
+        # to touch the page.
+        if args.manual:
+            say("\n" + "=" * 74)
+            say("MANUAL CAPTURE")
+            say("=" * 74)
+            say("In the browser window:")
+            say(f"  1. Set the document type to '{label}' using the field's own")
+            say("     autocomplete — click it, type, and pick from the dropdown so the")
+            say("     widget populates the field the way the app does.")
+            say(f"  2. Set the recording-date range to {start:%m/%d/%Y} .. {end:%m/%d/%Y}.")
+            say("  3. Do NOT click Search — the point is to read the form, not run it.")
+            input("\n  >>> Press Enter once the doc-type field is filled in...\n")
+
+            snapshot = page.evaluate("""() => {
+                const out = {};
+                document.querySelectorAll('input[name],select[name],textarea[name]').forEach(el => {
+                    out[el.name] = el.value;
+                });
+                return out;
+            }""")
+            dump("01_manual_form_values.json", json.dumps(snapshot, indent=2))
+            say("  form values after your interaction:")
+            for k, v in sorted(snapshot.items()):
+                marker = "  <<<" if "documentTypes" in k else ""
+                say(f"    {k} = {v!r}{marker}")
+
+            captured = snapshot.get(DOCTYPE_FIELD, "")
+            captured_contains = snapshot.get(CONTAINS_FIELD)
+            if captured:
+                say(f"\n  CAPTURED doc-type value: {captured!r}")
+                say(f"  CAPTURED contains value:  {captured_contains!r}")
+                # Try it immediately — this is the highest-prior candidate by far.
+                form = base_form(start, end)
+                form[DOCTYPE_FIELD] = captured
+                if captured_contains is not None:
+                    form[CONTAINS_FIELD] = captured_contains
+                try:
+                    pages, msgs, raw = post_search(portal, form)
+                except Exception as e:
+                    say(f"  POST with the captured value FAILED: {e}")
+                else:
+                    dump("01_manual_post.json", raw)
+                    say(f"  POST with the captured value -> totalPages={pages}  msgs={msgs}")
+                    if pages is not None and pages < 14:
+                        say("  THAT IS THE ANSWER. Use this encoding in Portal.search.")
+                    else:
+                        say("  Still unfiltered. The widget's value alone is not sufficient —")
+                        say("  the server may key the filter on something not in the form at")
+                        say("  all (a session-side selection set). Continuing to the matrix.")
+                    rows.append(("MANUAL_CAPTURED", pages, captured, captured_contains))
+            else:
+                say("\n  The doc-type field came back EMPTY after your interaction.")
+                say("  That is itself informative: the visible control is not where the")
+                say("  selection is stored, so the widget keeps it somewhere the form does")
+                say("  not expose — which is why posting the field can never filter.")
+                say("  Option (b), the unfiltered sweep, is then the correct design.")
         posted = set(base_form(start, end))
         phantom = sorted(posted - set(live))
         if phantom:

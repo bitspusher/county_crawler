@@ -10,59 +10,14 @@ from datetime import date
 
 import pytest
 
-from collect_sjc import SEARCH_ID, ResultCapExceeded, UnexpectedResponse
+from collect_sjc import ResultCapExceeded, UnexpectedResponse
+from tests.conftest import EMPTY_PAGE as EMPTY
+from tests.conftest import FakeCtx, FakePage, make_portal
 
 pytestmark = pytest.mark.unit
 
 START = date(2026, 7, 1)
 END = date(2026, 7, 31)
-
-
-class FakePage:
-    """Stands in for a Playwright page, serving canned HTML per XHR.
-
-    `responses` is consumed in order for the searchResults GETs; the initial
-    searchPost POST is answered with an empty body and recorded separately.
-    """
-
-    def __init__(self, responses):
-        self.url = f"https://host/Web/search/{SEARCH_ID}"
-        self._responses = list(responses)
-        self.posted_forms = []
-        self.requested_urls = []
-
-    def evaluate(self, _js, args):
-        url, method, form = args
-        if method == "POST":
-            self.posted_forms.append(form)
-            return {"status": 200, "text": ""}
-        self.requested_urls.append(url)
-        if not self._responses:
-            return {"status": 200, "text": "<div>no rows</div>"}
-        return {"status": 200, "text": self._responses.pop(0)}
-
-    def goto(self, *_a, **_kw):  # pragma: no cover - url already matches
-        raise AssertionError("should not navigate: already on the search page")
-
-    def wait_for_timeout(self, _ms):  # pragma: no cover
-        pass
-
-
-class FakeCtx:
-    def __init__(self):
-        self.request = None
-
-
-def make_portal(responses):
-    import collect_sjc
-
-    page = FakePage(responses)
-    # delay=0 keeps the suite fast. Never do this against the live portal —
-    # AI_CONTEXT.md rule 6 requires a real sleep between real requests.
-    return collect_sjc.Portal(FakeCtx(), page, delay=0), page
-
-
-EMPTY = "<div>no more rows</div>"
 
 
 def test_returns_rows_from_a_single_page(results_html):

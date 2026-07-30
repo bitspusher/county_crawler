@@ -56,6 +56,32 @@ DOCTYPES = {
     "TDUS": "Trustees Deed Under Default",
 }
 
+# The server discards the doc-type filter (measured 2026-07-29), so a sweep
+# retrieves every type recorded in the window — roughly 1300 documents per three
+# days, of which about 36 are relevant. Selection therefore happens here, on the
+# way into the database.
+#
+# These four are exactly MVP.md §3's "In" scope. Everything else is DISCARDED
+# rather than stored: keeping it would mean collecting `Substitution Of Trustee`
+# at 1016/mo, which AI_CONTEXT.md rule 7 forbids because it tracks payoffs, not
+# distress, and would swamp the dataset with false positives.
+#
+# Rescissions and cancellations arrive free with the sweep, which is what makes
+# ROADMAP Phase 3 reachable — they are the documents that say a recorded sale
+# will not happen.
+KEEP_DOCTYPES = {
+    "Notice Of Trustees Sale",
+    "Trustees Deed Under Default",
+    "Rescission Of Default",
+    "Cancellation/Termination",
+}
+
+# Only these need a detail fetch. The price derivation (§6.4) reads the
+# documentary transfer tax, which only completed sales carry; a NOTS detail adds
+# nothing the index does not already have. At ~31 TDUS/month this is ~31 extra
+# requests, against ~1300/month if details were fetched for everything relevant.
+DETAIL_DOCTYPES = {"Trustees Deed Under Default"}
+
 # Captured from the probe's autocomplete response. Used when the live
 # vocabulary lookup is unavailable.
 KNOWN_IDS = {
@@ -439,9 +465,21 @@ class Portal:
             return dict(KNOWN_IDS)
         return {it["value"]: it["name"] for it in items}
 
-    def search(self, doctype_value, start, end, mode="id", vocab=None):
-        """Two-step: POST sets state, GET reads the grid."""
-        dt = vocab[doctype_value] if (mode == "id" and vocab) else doctype_value
+    def search(self, doctype_value, start, end, mode="id", vocab=None, max_pages=40):
+        """Two-step: POST sets state, GET reads the grid.
+
+        `doctype_value` may be None to search the window UNFILTERED. Measured
+        live on 2026-07-29: the doc-type field is a text-input autocomplete and
+        the server discards whatever the collector puts in it, so a "filtered"
+        search returns every doc type recorded in the window anyway. Passing None
+        makes that explicit rather than pretending to filter — and one unfiltered
+        sweep replaces one request per type, since they all returned identical
+        results.
+
+        The doc-type selection that actually happens is client-side, in the
+        views (`v_upcoming`, `v_auction_sales`) and in KEEP_DOCTYPES below.
+        """
+        dt = "" if doctype_value is None else (vocab[doctype_value] if (mode == "id" and vocab) else doctype_value)
         form = {
             "field_DocNumID": "",
             "field_RecDateID_DOT_StartDate": start.strftime("%m/%d/%Y"),
@@ -456,7 +494,31 @@ class Portal:
             "field_selfservice_documentTypes": dt,
             "field_UseAdvancedSearch": "",
         }
-        self.xhr(f"{HOST}/Web/searchPost/{SEARCH_ID}", method="POST", form=form)
+        post_body = self.xhr(f"{HOST}/Web/searchPost/{SEARCH_ID}", method="POST", form=form)
+
+        # The POST answers with JSON — {"validationMessages":{},"totalPages":N,
+        # "currentPage":1} — so the size of the result set is known BEFORE any
+        # page is walked. Checking it here turns "discover at page 40 that the
+        # window was too wide" into "refuse the window up front", and surfaces
+        # server-side validation complaints that would otherwise be invisible.
+        self.total_pages = None
+        try:
+            meta = json.loads(post_body)
+        except json.JSONDecodeError:
+            pass  # older behaviour: fall back to walking
+        else:
+            self.total_pages = meta.get("totalPages")
+            msgs = meta.get("validationMessages") or {}
+            if msgs:
+                log(f"    ! server validation messages: {msgs}")
+            if self.total_pages:
+                log(f"    server reports {self.total_pages} page(s)")
+                if self.total_pages > max_pages:
+                    raise ResultCapExceeded(
+                        f"window needs {self.total_pages} pages, over the {max_pages}-page "
+                        "limit — narrow it (try a shorter --window-days)"
+                    )
+
         rows, page = [], 1
         while True:
             html = self.xhr(f"{HOST}/Web/searchResults/{SEARCH_ID}?page={page}&_={int(time.time() * 1000)}")
@@ -474,8 +536,8 @@ class Portal:
                 r["page_no"] = page
             rows += got
             log(f"    page {page}: {len(got)} rows")
-            if page >= 40:
-                log("    !! 40 pages, stopping — window too wide")
+            if page >= max_pages:
+                log(f"    !! {max_pages} pages, stopping — window too wide")
                 break
             page += 1
         return rows
@@ -493,6 +555,22 @@ class Portal:
 
 
 # --------------------------------------------------------------------------
+
+
+def windows(start, end, days):
+    """Split [start, end] into consecutive windows of at most `days` days.
+
+    Monthly windows are too wide now that every sweep is unfiltered: a month is
+    ~13,000 documents and roughly 130 pages, which trips the result cap. Three
+    days is ~1300 documents and 14 pages, which the server serves happily.
+    """
+    if days < 1:
+        raise ValueError("days must be >= 1")
+    cur = start
+    while cur <= end:
+        stop = min(cur + timedelta(days=days - 1), end)
+        yield cur, stop
+        cur = stop + timedelta(days=1)
 
 
 def months(start, end):
@@ -587,8 +665,93 @@ def run_log_finish(con, run_id, rows_indexed, details_fetched, notes=None):
     con.commit()
 
 
+def _mmddyyyy_sort_key(v):
+    """Sort MM/DD/YYYY strings chronologically.
+
+    Recording dates are stored exactly as the portal renders them (raw values
+    only, §6), so ORDER BY on the column sorts lexically — putting 01/05 before
+    12/31 of the prior year. Ordering happens in Python instead of changing the
+    stored format.
+    """
+    if not v:
+        return (0, 0, 0)
+    parts = str(v).split()[0].split("/")
+    if len(parts) != 3:
+        return (0, 0, 0)
+    try:
+        m, d, y = (int(p) for p in parts)
+    except ValueError:
+        return (0, 0, 0)
+    return (y, m, d)
+
+
+def report_sections(con, days=7, limit=40):
+    """The §7 output: Section A (coming up) and Section B (just closed).
+
+    This is what the product is for — everything below it in report() is
+    diagnostics. Unavailable fields are printed as unavailable rather than
+    omitted, per §7: a silently dropped field reads as "checked and empty".
+    """
+    print("\n" + "=" * 72)
+    print(f"SECTION A — COMING UP FOR AUCTION   (notices recorded, last {days} days)")
+    print("=" * 72)
+
+    rows = [r for r in con.execute("SELECT doc_number, recording_date, grantors FROM v_upcoming")]
+    rows.sort(key=lambda r: _mmddyyyy_sort_key(r[1]), reverse=True)
+    if not rows:
+        print("  (no notices of trustee's sale collected yet)")
+    else:
+        print(f"  {'DOC NUMBER':14s} {'RECORDED':11s} {'AUCTION DATE':13s} PROPERTY / OWNER")
+        for dn, rd, grantors in rows[:limit]:
+            owner = (grantors or "unavailable")[:44]
+            # Neither of these is in the recorder index (§6.3, and the index
+            # carries the notice's recording date only, not the sale date).
+            print(f"  {dn:14s} {(rd or 'unavailable'):11s} {'unavailable':13s} {owner}")
+        if len(rows) > limit:
+            print(f"  ... and {len(rows) - limit} more")
+    print("\n  Address and APN: UNAVAILABLE — not present anywhere in the recorder")
+    print("  index or detail views (MVP.md §6.3). Owner is the grantor name from the")
+    print("  grantor/grantee index, which the recorder states is a finding aid only,")
+    print("  not a substitute for a title search.")
+    print("  Auction date: UNAVAILABLE — the index carries the notice's recording")
+    print("  date, not the sale date.")
+    print("  WARNING: rescissions and cancellations are collected but not yet joined")
+    print("  out of this list (ROADMAP Phase 3), so some of these sales will not")
+    print("  happen. Sales are also postponed by spoken announcement at the auction,")
+    print("  which never reaches the recorder at all — no amount of collection")
+    print("  catches those.")
+
+    print("\n" + "=" * 72)
+    print("SECTION B — JUST CLOSED   (completed trustee's sales)")
+    print("=" * 72)
+    sales = list(
+        con.execute(
+            "SELECT doc_number, recording_date, tax_amount, derived_price, sale_class, grantees FROM v_auction_sales"
+        )
+    )
+    sales.sort(key=lambda r: _mmddyyyy_sort_key(r[1]), reverse=True)
+    if not sales:
+        print("  (no completed sales collected yet)")
+    else:
+        print(f"  {'DOC NUMBER':14s} {'RECORDED':11s} {'PRICE':>13s}  {'CLASS':19s} BUYER")
+        for dn, rd, _tax, price, cls, gees in sales[:limit]:
+            price_s = f"${price:,.0f}" if price else "unavailable"
+            print(f"  {dn:14s} {(rd or '?'):11s} {price_s:>13s}  {(cls or '?'):19s} {(gees or 'unavailable')[:34]}")
+        if len(sales) > limit:
+            print(f"  ... and {len(sales) - limit} more")
+    print("\n  Price is DERIVED, not recorded: computed from the documentary transfer")
+    print(f"  tax at ${DTT_RATE_PER_1000:.2f}/$1,000 (±$500). Two assumptions behind it are still")
+    print("  UNVALIDATED — the Stockton charter-city rate, and the §11926 zero-tax")
+    print("  split separating genuine purchases from lender credit-bids (§6.4, §6.5).")
+    print("  'likely_reversion' means $0.00 tax, read as the lender taking the")
+    print("  property back. 'unknown' means the tax amount could not be read.")
+    print("=" * 72)
+
+
 def report(con):
+    report_sections(con)
     print("\n" + "=" * 68)
+    print("DIAGNOSTICS")
     n_i = con.execute("SELECT COUNT(DISTINCT doc_number) FROM index_obs").fetchone()[0]
     n_d = con.execute("SELECT COUNT(DISTINCT doc_number) FROM detail_obs WHERE fetch_ok=1").fetchone()[0]
     print(f"documents indexed: {n_i}    details fetched: {n_d}")
@@ -647,7 +810,21 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--start", default=(date.today() - timedelta(days=30)).isoformat())
     ap.add_argument("--end", default=date.today().isoformat())
-    ap.add_argument("--types", default="TDUS,NOTS")
+    ap.add_argument(
+        "--types",
+        default="TDUS,NOTS",
+        help="kept for compatibility; the server ignores the doc-type "
+        "filter, so every sweep is unfiltered and selection happens "
+        "against KEEP_DOCTYPES on the way into the DB",
+    )
+    ap.add_argument(
+        "--window-days",
+        type=int,
+        default=3,
+        help="days per search window (default 3). A month is ~130 pages "
+        "unfiltered and trips the result cap; 3 days is ~14.",
+    )
+    ap.add_argument("--max-pages", type=int, default=40, help="refuse a window needing more pages than this")
     ap.add_argument("--no-detail", action="store_true", help="index only, skip detail fetches")
     ap.add_argument("--headed", action="store_true")
     ap.add_argument("--delay", type=float, default=1.5)
@@ -673,7 +850,15 @@ def main():
 
     start = date.fromisoformat(args.start)
     end = date.fromisoformat(args.end)
-    want = [DOCTYPES[k.strip()] for k in args.types.split(",") if k.strip() in DOCTYPES]
+    # --types is no longer used to build a query: the server discards the
+    # doc-type filter, so there is one unfiltered sweep per window and selection
+    # happens against KEEP_DOCTYPES. The flag is retained so existing invocations
+    # keep working, but it is reported as inert rather than silently ignored.
+    if args.types and args.types != "TDUS,NOTS":
+        log(
+            f"note: --types {args.types!r} does not affect the query — the portal "
+            "ignores the doc-type filter. Selection uses KEEP_DOCTYPES."
+        )
 
     with sync_playwright() as p:
         ctx = p.chromium.launch_persistent_context(
@@ -698,88 +883,91 @@ def main():
             else:
                 log(f"  {k}: id={vocab[label]}  '{label}'")
 
+        # ONE unfiltered sweep per window, not one per doc type. The server
+        # discards the doc-type filter, so searching per type issued N identical
+        # requests and stored the same rows N times.
         capped_windows = []
-        for label in want:
-            for qs, qe in months(start, end):
-                log(f"{label}  {qs} .. {qe}")
-                run_id = run_log_start(con, label, qs, qe)
-                mode_used, rows = "id", []
+        for qs, qe in windows(start, end, args.window_days):
+            log(f"sweep  {qs} .. {qe}  (unfiltered — the server ignores the type filter)")
+            run_id = run_log_start(con, "ALL (unfiltered sweep)", qs, qe)
+            rows = []
 
-                # A cap is fatal for this window and must NOT reach the
-                # label-mode retry below: the window returned an incomplete
-                # set, not an empty one, and retrying would silently store a
-                # truncated month. §5.1 / AI_CONTEXT.md rule 4.
+            # A cap is fatal for this window: it returned an incomplete set, not
+            # an empty one, and continuing would store a truncated window that
+            # looks complete. §5.1 / AI_CONTEXT.md rule 4.
+            try:
+                rows = portal.search(None, qs, qe, max_pages=args.max_pages)
+            except ResultCapExceeded as e:
+                log(f"  !! RESULT CAP: {e}")
+                log("     window is INCOMPLETE — narrow it and re-run. Nothing stored.")
+                run_log_finish(con, run_id, 0, 0, f"RESULT_CAP: {e}")
+                capped_windows.append(f"{qs}..{qe}")
+                continue
+            except UnexpectedResponse as e:
+                # The session died or the portal changed shape. Every remaining
+                # window would fail the same way, so stop rather than grind.
+                run_log_finish(con, run_id, 0, 0, f"UNEXPECTED_RESPONSE: {e}")
+                ctx.close()
+                sys.exit(f"\n!! {e}\n")
+            except RuntimeError as e:
+                log(f"  ! {e}")
+
+            # An unexpected zero-row window is a loud failure, not a result. The
+            # portal returns an empty grid both for "nothing matched" and for
+            # "your session is no longer authenticated", and storing the second
+            # as the first poisons the dataset with absence. Aborting the whole
+            # run rather than this window is deliberate: a dead session returns
+            # zero for EVERY window. AI_CONTEXT.md rule 3.
+            if not rows:
+                if args.allow_zero_rows:
+                    log("  zero rows accepted (--allow-zero-rows)")
+                    run_log_finish(con, run_id, 0, 0, "ZERO_ROWS: accepted via --allow-zero-rows")
+                    continue
+                run_log_finish(con, run_id, 0, 0, "ZERO_ROWS: aborted run")
+                ctx.close()
+                sys.exit(
+                    f"\n!! ZERO ROWS for the sweep {qs}..{qe}.\n"
+                    "   An unfiltered window should return hundreds of documents, so\n"
+                    "   this is a failure, not an empty window. Check, in order:\n"
+                    "     1. Is the session still authenticated? Re-run with --headed\n"
+                    "        and look for the disclaimer/CAPTCHA gate.\n"
+                    "     2. Did the portal change? Re-run with --debug and inspect\n"
+                    "        ./debug/001_results_p1.txt for the app shell instead of a grid.\n"
+                    "   If the window is genuinely empty, re-run with --allow-zero-rows.\n"
+                )
+
+            # Selection happens HERE, because the server would not do it. Keeping
+            # everything would mean collecting Substitution Of Trustee at
+            # 1016/mo, which rule 7 forbids.
+            keep = [r for r in rows if r["doc_type"] in KEEP_DOCTYPES]
+            mix = {}
+            for r in keep:
+                mix[r["doc_type"]] = mix.get(r["doc_type"], 0) + 1
+            log(f"  {len(rows)} documents in window; keeping {len(keep)} in scope: {mix or '{}'}")
+
+            store_index(con, keep, qs, qe)
+
+            note = f"swept={len(rows)}; kept={len(keep)}; mix={mix}"
+            if args.no_detail:
+                run_log_finish(con, run_id, len(keep), 0, note + "; --no-detail")
+                continue
+
+            # Details only for the types whose tax amount the price derivation
+            # needs — ~31/month rather than ~1300.
+            todo = [r for r in keep if r["detail_id"] and r["doc_type"] in DETAIL_DOCTYPES]
+            if args.limit_details:
+                todo = todo[: args.limit_details]
+            n_ok = 0
+            for i, r in enumerate(todo, 1):
                 try:
-                    rows = portal.search(label, qs, qe, mode="id", vocab=vocab)
-                except ResultCapExceeded as e:
-                    log(f"  !! RESULT CAP: {e}")
-                    log("     window is INCOMPLETE — narrow it and re-run. Nothing stored.")
-                    run_log_finish(con, run_id, 0, 0, f"RESULT_CAP: {e}")
-                    capped_windows.append(f"{label} {qs}..{qe}")
-                    continue
-                except RuntimeError as e:
-                    log(f"  ! {e}")
-
-                if not rows:
-                    log("  0 rows with numeric id; retrying with the label string")
-                    try:
-                        rows = portal.search(label, qs, qe, mode="label")
-                        mode_used = "label"
-                    except ResultCapExceeded as e:
-                        log(f"  !! RESULT CAP: {e}")
-                        run_log_finish(con, run_id, 0, 0, f"RESULT_CAP: {e}")
-                        capped_windows.append(f"{label} {qs}..{qe}")
-                        continue
-                    except RuntimeError as e:
-                        log(f"  ! {e}")
-
-                log(f"  {len(rows)} rows (doctype sent as {mode_used})")
-
-                # An unexpected zero-row window is a loud failure, not a
-                # result. The portal returns an empty grid both for "nothing
-                # matched" and for "your session is no longer authenticated",
-                # and storing the second as the first poisons the dataset with
-                # absence. Aborting the whole run (rather than this window) is
-                # deliberate: a dead session returns zero for EVERY window, and
-                # grinding through a 12-month backfill to discover that wastes
-                # the requests and buries the signal. AI_CONTEXT.md rule 3.
-                if not rows:
-                    if args.allow_zero_rows:
-                        log("  zero rows accepted (--allow-zero-rows)")
-                        run_log_finish(con, run_id, 0, 0, "ZERO_ROWS: accepted via --allow-zero-rows")
-                        continue
-                    run_log_finish(con, run_id, 0, 0, "ZERO_ROWS: aborted run")
-                    ctx.close()
-                    sys.exit(
-                        f"\n!! ZERO ROWS for {label} {qs}..{qe} — expected ~30/month.\n"
-                        "   This is a failure, not an empty month. Check, in order:\n"
-                        "     1. Is the session still authenticated? Re-run with --headed\n"
-                        "        and look for the disclaimer/CAPTCHA gate.\n"
-                        "     2. Did the portal change? Re-run with --debug and inspect\n"
-                        "        ./debug/001_results_p1.txt for the app shell instead of a grid.\n"
-                        "     3. Was the doc type renamed? Check the vocabulary lines above.\n"
-                        "   If the month is genuinely empty, re-run with --allow-zero-rows.\n"
-                    )
-
-                store_index(con, rows, qs, qe)
-
-                if args.no_detail:
-                    run_log_finish(con, run_id, len(rows), 0, f"mode={mode_used}; --no-detail")
-                    continue
-                todo = [r for r in rows if r["detail_id"]]
-                if args.limit_details:
-                    todo = todo[: args.limit_details]
-                n_ok = 0
-                for i, r in enumerate(todo, 1):
-                    try:
-                        d = parse_detail(portal.detail(r["detail_id"]))
-                        store_detail(con, r["doc_number"], r["detail_id"], d)
-                        n_ok += 1
-                        log(f"    [{i}/{len(todo)}] {r['doc_number']} tax={d.get('tax_raw')}")
-                    except Exception as e:
-                        log(f"    [{i}/{len(todo)}] {r['doc_number']} FAILED: {e}")
-                        store_detail(con, r["doc_number"], r["detail_id"], {}, ok=False)
-                run_log_finish(con, run_id, len(rows), n_ok, f"mode={mode_used}")
+                    d = parse_detail(portal.detail(r["detail_id"]))
+                    store_detail(con, r["doc_number"], r["detail_id"], d)
+                    n_ok += 1
+                    log(f"    [{i}/{len(todo)}] {r['doc_number']} tax={d.get('tax_raw')}")
+                except Exception as e:
+                    log(f"    [{i}/{len(todo)}] {r['doc_number']} FAILED: {e}")
+                    store_detail(con, r["doc_number"], r["detail_id"], {}, ok=False)
+            run_log_finish(con, run_id, len(keep), n_ok, note)
         ctx.close()
 
     report(con)
