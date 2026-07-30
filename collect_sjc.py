@@ -17,8 +17,10 @@ Design constraints, from the spec:
   * Raw values only in tables. Price derivation lives in a VIEW, so revisiting the
     transfer-tax assumption never means re-collecting.
   * Deterministic parsing. Zero rows where rows were expected is a loud failure.
-  * Polite. Serial requests, sleep between each, monthly windows to stay under the
-    server-side result cap.
+  * Polite. Serial requests, sleep between each, short windows (default 3 days)
+    to stay under the server-side result cap — every sweep is unfiltered because
+    the portal discards the doc-type filter (measured 2026-07-29), so selection
+    happens client-side via KEEP_DOCTYPES.
 
 Session: reuses ./.browser_profile from the probe, so the CAPTCHA stays solved.
 
@@ -703,7 +705,9 @@ def report_sections(con, days=7, limit=40):
     else:
         # NOT labelled "owner". Live data (June 2026) shows the grantor list
         # carries the foreclosure TRUSTEE alongside the homeowner — e.g.
-        # "MOLINA EDWARD J | PRIME RECON LLC", "NOYOLA MARGARITA | ZBS LAW LLP".
+        # e.g. docs 2026-055449 and 2026-051883, where the homeowner is listed
+        # beside PRIME RECON LLC / ZBS LAW LLP (individual names stay in the DB,
+        # not in code — AI_CONTEXT.md rule 11).
         # The index does not label party roles, so calling this column "owner"
         # asserts a distinction the data does not make. AI_CONTEXT.md rule 8.
         print(f"  {'DOC NUMBER':14s} {'RECORDED':11s} {'AUCTION DATE':13s} PARTIES ON THE NOTICE")

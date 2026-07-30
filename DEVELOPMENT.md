@@ -131,6 +131,14 @@ The parts that stop the pipeline hurting the repo:
   `validate_spec_boundaries.py` enforces it before dispatch (`plan`) and after
   (`validate-diff`). An exclusion list ("Do NOT touch: …") never becomes an
   allow-list — there is a test for that.
+- **Protected paths.** A hard deny-list (`AI_CONTEXT.md`, `SPEC_TEMPLATE.md`,
+  `MVP.md`, `ROADMAP.md`, `Makefile`, `scripts/`, `.claude/`, …) that no spec
+  may declare and no executor diff may touch — otherwise the boundary check is
+  circular, since the architect agent writes the specs. A spec with no
+  `## Files` section is refused outright, not warned through. Self-modification
+  of the guardrails is human-only.
+- **`[human]` roadmap tags.** Items needing a headed browser, a phone call, or
+  founder judgment are tagged in ROADMAP.md; the architect must not spec them.
 - **A boundary violation overrides a MERGE verdict.** Boundary enforcement is
   mechanical, so an agent talking itself past one is exactly the failure the
   check exists to prevent.

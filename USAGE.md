@@ -68,9 +68,13 @@ Never commit `.browser_profile/` — it holds live session cookies. It's in `.gi
 python collect_sjc.py --start 2026-06-01 --end 2026-07-31
 ```
 
-Date range is inclusive and gets split into **one-month windows** internally, because the
-portal caps result sets (MVP.md §5.1). You can pass a year; you don't need to loop
-yourself.
+Date range is inclusive and gets split into **3-day windows** internally
+(`--window-days`). Every window is an **unfiltered sweep** — the portal silently
+ignores the doc-type filter (measured 2026-07-29) — and a full unfiltered month
+is ~130 pages, which trips the portal's result cap. The collector keeps only the
+four in-scope types (`KEEP_DOCTYPES`: NOTS, TDUS, Rescission Of Default,
+Cancellation/Termination) on the way into the database, and fetches details only
+for TDUS. You can pass a year; you don't need to loop yourself.
 
 ### Flags
 
@@ -78,7 +82,10 @@ yourself.
 |---|---|---|
 | `--start YYYY-MM-DD` | 30 days ago | Start of the recording-date range |
 | `--end YYYY-MM-DD` | today | End of the range, inclusive |
-| `--types TDUS,NOTS` | `TDUS,NOTS` | Which document types. `TDUS` = completed sales, `NOTS` = upcoming. Unknown names are silently dropped |
+| `--types TDUS,NOTS` | `TDUS,NOTS` | **Inert** — kept for compatibility. The portal ignores the doc-type filter, so every sweep is unfiltered and selection uses `KEEP_DOCTYPES` |
+| `--window-days N` | `3` | Days per search window. A month unfiltered trips the result cap; 3 days is ~14 pages |
+| `--max-pages N` | `40` | Refuse a window needing more pages than this (read from the POST's `totalPages` before any page is fetched) |
+| `--allow-zero-rows` | off | Accept a zero-row window instead of aborting. Only after checking WHY — a dead session also returns zero |
 | `--no-detail` | off | Index only. Skips the per-document detail fetch — **no tax amount, so no derived price** |
 | `--limit-details N` | `0` (no limit) | Fetch details for only the first N documents per window. Good for a smoke test |
 | `--headed` | off | Show the browser. Required whenever the gate needs clearing |
@@ -88,24 +95,25 @@ yourself.
 
 ### What a run costs
 
-Requests are serial by design. At ~31 TDUS records in a month, with the default delay
-plus the per-detail page settle, budget roughly **1.5–2 minutes per document type per
-month of range**. A one-year backfill of both types is well under an hour. Index-only
-runs (`--no-detail`) are far faster — a handful of requests per window.
+Requests are serial by design. Sweep arithmetic: ~10 windows per month × (1 POST
++ ~13-14 result pages) ≈ **150 index requests per month of range**, plus ~31 TDUS
+detail fetches — budget roughly **4-5 minutes per month collected** at the
+default delay. A one-year backfill is ~1,800 index requests plus ~370 details:
+about an hour in one headed session. Index-only runs (`--no-detail`) skip the
+details but not the sweep.
 
 ### Suggested first pass
 
 Validate the pipeline on a small slice before backfilling:
 
 ```sh
-python collect_sjc.py --start 2026-06-01 --end 2026-06-30 \
-                      --types TDUS --limit-details 5 --headed --debug
+python collect_sjc.py --start 2026-06-01 --end 2026-06-03 --limit-details 2 --headed --debug
 ```
 
-Then the real month, which is what MVP.md §11.2 asks for:
+Then a real month (June 2026 was collected this way on 2026-07-29):
 
 ```sh
-python collect_sjc.py --start 2026-06-01 --end 2026-06-30 --types TDUS
+python collect_sjc.py --start 2026-06-01 --end 2026-06-30 --headed
 ```
 
 ---
@@ -167,8 +175,9 @@ log, don't trust that window's row count.
 Normal fallback. The collector sends the doc type as a numeric ID first and retries with
 the literal label. If the retry works, fine.
 
-**`!! ZERO ROWS — expected ~30/month. Investigate before trusting.`**
-Take this seriously. Expected volume is ~35 NOTS and ~31 TDUS per month. Zero usually
+**`!! ZERO ROWS ...`** (the run aborts)
+Take this seriously. An unfiltered 3-day window should return hundreds of
+documents (~35 NOTS and ~31 TDUS per month among them). Zero usually
 means the session lapsed or the portal changed. The run does **not** stop and will still
 commit — check the log before trusting a report.
 

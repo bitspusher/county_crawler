@@ -280,14 +280,15 @@ def test_report_states_unavailable_fields_rather_than_omitting_them(db, add_tdus
 
 def test_section_a_does_not_call_the_grantor_list_the_owner(db, add_tdus, capsys):
     """Live June 2026 data showed the grantor list carries the foreclosure
-    TRUSTEE alongside the homeowner — "MOLINA EDWARD J | PRIME RECON LLC" — and
+    TRUSTEE alongside the homeowner — doc 2026-055449 pairs the homeowner with
+    PRIME RECON LLC — and
     the index does not label roles. Labelling that column "owner" asserts a
     distinction the data does not make (AI_CONTEXT.md rule 8)."""
     add_tdus(
         "2026-000002",
         tax_amount=None,
         doc_type=DOCTYPES["NOTS"],
-        grantor="MOLINA EDWARD J | PRIME RECON LLC",
+        grantor="DOE, JOHN | PRIME RECON LLC",  # synthetic homeowner, real trustee firm
     )
     report_sections(db)
     out = capsys.readouterr().out

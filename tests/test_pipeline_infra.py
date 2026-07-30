@@ -268,11 +268,60 @@ def test_plan_defers_a_same_file_contender_without_dropping_the_batch(tmp_path):
     assert "DEFER: GEMINI_B.md" in err
 
 
-def test_plan_warns_but_still_dispatches_a_spec_with_no_files_section(tmp_path):
+def test_plan_blocks_a_spec_with_no_files_section(tmp_path):
+    """Changed 2026-07-29 (review): previously a warning that still dispatched.
+
+    An undeclared boundary means an unbounded diff, which defeats the entire
+    enforcement layer — the executor could touch anything and validate-diff
+    would have nothing to compare against.
+    """
     a = _spec(tmp_path, "**Status:** Ready for implementation\n\nNo files section.\n", "GEMINI_A.md")
     code, out, err = _plan([a])
-    assert code == 0 and out == [a]
-    assert "WARN (NO ## Files)" in err
+    assert code == 0 and out == []
+    assert "SKIP (NO ## Files)" in err
+
+
+def test_plan_blocks_a_spec_declaring_a_protected_path(tmp_path):
+    """The architect writes the specs, so without this check a spec declaring
+    AI_CONTEXT.md or the pipeline scripts would pass its own boundary
+    validation, auto-merge, and push. Self-modification of the guardrails is
+    human-only."""
+    a = _spec(
+        tmp_path,
+        "**Status:** Ready for implementation\n\n## Files\n- `AI_CONTEXT.md`\n",
+        "GEMINI_A.md",
+    )
+    b = _spec(
+        tmp_path,
+        "**Status:** Ready for implementation\n\n## Files\n- `scripts/implement.sh`\n",
+        "GEMINI_B.md",
+    )
+    c = _spec(
+        tmp_path,
+        "**Status:** Ready for implementation\n\n## Files\n- `collect_sjc.py`\n",
+        "GEMINI_C.md",
+    )
+    code, out, err = _plan([a, b, c])
+    assert code == 0 and out == [c]
+    assert err.count("SKIP (PROTECTED)") == 2
+
+
+@pytest.mark.parametrize(
+    "path,expected",
+    [
+        ("AI_CONTEXT.md", True),
+        ("scripts/validate_spec_boundaries.py", True),
+        (".claude/agents/software-architect.md", True),
+        ("ROADMAP.md", True),
+        ("Makefile", True),
+        ("./scripts/implement.sh", True),
+        ("collect_sjc.py", False),
+        ("tests/test_sweep.py", False),
+        ("reviews/some-file.md", False),
+    ],
+)
+def test_protected_predicate(path, expected):
+    assert vsb.protected(path) is expected
 
 
 def test_plan_fails_hard_on_a_missing_spec(tmp_path):

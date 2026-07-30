@@ -52,6 +52,37 @@ BENIGN_AUTOCOMMIT = {
     "reviews/spec-attempts.json",
 }
 
+# Paths no spec may declare and no executor diff may touch — the rules the
+# pipeline is governed BY, and the pipeline itself. Without this list the
+# boundary check is circular: the architect agent writes the specs, so a spec
+# declaring AI_CONTEXT.md or this file would pass its own boundary validation,
+# auto-merge, and push. Self-modification of the guardrails is a human-only
+# change (2026-07-29 review, security-lens).
+PROTECTED_FILES = {
+    "AI_CONTEXT.md",
+    "SPEC_TEMPLATE.md",
+    "MVP.md",
+    "ROADMAP.md",
+    "Makefile",
+    ".pre-commit-config.yaml",
+    ".gitignore",
+}
+PROTECTED_PREFIXES = (
+    "scripts/",
+    ".claude/",
+    ".github/",
+)
+
+
+def protected(path):
+    """True when a path is off-limits to the spec pipeline."""
+    # removeprefix, not lstrip: lstrip("./") strips CHARACTERS and would eat
+    # the leading dot off ".claude/", unprotecting the whole directory.
+    p = path.strip()
+    while p.startswith("./"):
+        p = p.removeprefix("./")
+    return p in PROTECTED_FILES or p.startswith(PROTECTED_PREFIXES)
+
 
 def _bullet_path(line):
     """Return (file_path, prefix) for a `## Files` bullet, else (None, line).
@@ -148,7 +179,15 @@ def plan_cmd(spec_paths):
             print(f"SKIP (QUEUED): {name}", file=sys.stderr)
             continue
         if not files:
-            print(f"WARN (NO ## Files): {name} dispatched without boundary protection", file=sys.stderr)
+            # Previously a warning that still dispatched. An undeclared boundary
+            # means an unbounded diff, which defeats the entire enforcement
+            # layer — so it now blocks (2026-07-29 review, security-lens).
+            print(f"SKIP (NO ## Files): {name} — no boundary declared; not dispatching", file=sys.stderr)
+            continue
+        bad = [f for f in files if protected(f)]
+        if bad:
+            print(f"SKIP (PROTECTED): {name} declares protected path(s): {', '.join(bad)}", file=sys.stderr)
+            continue
         conflict = next((f for f in files if f in claimed), None)
         if conflict:
             print(f"DEFER: {name} (file '{conflict}' already claimed by {claimed[conflict]})", file=sys.stderr)
@@ -216,6 +255,17 @@ def validate_diff_cmd(spec_path, ref):
 
     changed = set(result.stdout.strip().split("\n")) if result.stdout.strip() else set()
     changed -= BENIGN_AUTOCOMMIT
+
+    # Protected paths fail the diff even when the spec declared them — the
+    # declaration itself is invalid, and `plan` would have refused it. This is
+    # the backstop for a spec dispatched around the planner.
+    touched_protected = sorted(f for f in changed if protected(f))
+    if touched_protected:
+        print("ERROR: Diff touches protected path(s) the pipeline may never modify:")
+        for f in touched_protected:
+            print(f"  - {f}")
+        print("These are the pipeline's own guardrails; changing them is human-only.")
+        return 1
 
     out_of_bounds = changed - set(files_declared)
     if out_of_bounds:

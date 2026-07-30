@@ -75,7 +75,9 @@ The portal is a county server behind a reCAPTCHA and a disclaimer (§10).
   or automated clicking of the disclaimer.
 - Never fetch from `/Web/cart` or any paid-image path. Index and detail
   metadata only.
-- Monthly windows exist to stay under the result cap. Do not batch them wider.
+- Short windows (default 3 days) exist to stay under the result cap — the
+  server ignores the doc-type filter, so every sweep is unfiltered and a full
+  month is ~130 pages, which always trips the cap. Do not batch windows wider.
 
 ## 7. Do not collect `Substitution Of Trustee`
 
@@ -112,6 +114,23 @@ and "Named mistakes not to make" sections are binding.
 - Do not implement parked items (`Default` collection, scoring/ranking,
   prediction, tax-default collection, multi-county, homeowner-facing anything).
 - Do not start Phase N+1 while Phase N is unmerged.
-- Prefer the smallest correct change. This is a 785-line repo with a real
-  unknown at its centre (the §5.1 automation question); ambitious rewrites are
-  strictly worse than narrow fixes.
+- Prefer the smallest correct change. This is a small repo with almost no
+  ground truth to catch a mistake; ambitious rewrites are strictly worse than
+  narrow fixes.
+- Roadmap items tagged `[human]` need a headed browser, a phone call, or the
+  founder's judgment. Never write a spec for one.
+
+## 11. Individual party names stay out of tracked files
+
+The collected records name private individuals in active foreclosure. Public
+record or not, those names do not belong in git history — the repo is private
+today, but history makes every future visibility decision retroactive.
+
+- Party names of **individuals** appear only in the local database (`sjc.db`)
+  and in report/CSV output — never in tracked files: docs, code comments, test
+  fixtures, captured fixtures, review artifacts, commit messages.
+- Reference documents by **document number** instead. Company names (trustee
+  firms, banks, LLCs) may appear where they carry analytical content.
+- Captured fixtures (rule 9's capture flow) are redacted before commit.
+- Pipeline review artifacts quote diffs and agent output; a diff touching test
+  fixtures or examples must not carry individual names into `reviews/`.

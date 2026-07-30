@@ -69,14 +69,19 @@ def main():
     ap.add_argument("--headed", action="store_true")
     ap.add_argument("--delay", type=float, default=1.5)
     ap.add_argument("--types", default="TDUS")
+    # A 3-day default window, NOT a month: the portal ignores the doc-type
+    # filter, so every search is an unfiltered sweep and a full month is ~130
+    # pages — it trips the result cap every time. 3 days is ~14 pages.
+    ap.add_argument("--start", help="window start YYYY-MM-DD (default: last 3 days of the prior month)")
+    ap.add_argument("--end", help="window end YYYY-MM-DD")
     args = ap.parse_args()
 
     if collect_sjc.sync_playwright is None:
         return say("pip install playwright && python -m playwright install chromium") or 2
 
     label = DOCTYPES.get(args.types.strip(), DOCTYPES["TDUS"])
-    end = date.today().replace(day=1) - timedelta(days=1)
-    start = end.replace(day=1)
+    end = date.fromisoformat(args.end) if args.end else date.today().replace(day=1) - timedelta(days=1)
+    start = date.fromisoformat(args.start) if args.start else end - timedelta(days=2)
     stamp = date.today().isoformat()
     captured = []
 
@@ -108,12 +113,17 @@ def main():
         except collect_sjc.ResultCapExceeded as e:
             ctx.close()
             say(f"Result cap: {e}")
-            say("Narrow the window (edit --types or wait for a thinner month) and re-run.")
+            say("Narrow the window with --start/--end (a 1-2 day range always fits).")
             return 1
 
         grid = portal.xhr(f"{HOST}/Web/searchResults/{SEARCH_ID}?page=1")
-        rows = parse_results(grid)
-        say(f"  page 1: {len(rows)} rows parsed by the CURRENT parser")
+        all_rows = parse_results(grid)
+        # The sweep is unfiltered, so page 1 carries every doc type recorded in
+        # the window; details must come from rows of the TARGET type only.
+        rows = [r for r in all_rows if r.get("doc_type") == label]
+        say(f"  page 1: {len(all_rows)} rows parsed, {len(rows)} of type '{label}'")
+        say("  NOTE: captured fixtures carry real party names — redact individual")
+        say("  names per AI_CONTEXT.md rule 11 before committing.")
         captured.append(write("search_results.html", grid, stamp))
 
         # Two details: one with tax, one with $0.00 if the month contains one.
