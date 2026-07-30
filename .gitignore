@@ -42,3 +42,17 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# --- Agent pipeline ---
+# Concurrency lock, recreated per run.
+.pipeline.lock
+reviews/*.json.lock
+# Per-run logs. The durable signals — pipeline-health.log, spec-attempts.json,
+# collection-metrics.jsonl, collection-floor.json, agent-costs.jsonl,
+# dismissed-findings.md, needs-human-review.md — ARE tracked, deliberately:
+# they are how a later cycle knows what already happened.
+reviews/*.log
+!reviews/pipeline-health.log
+
+# Harness leftovers from atomic writes of .claude/settings.local.json
+.claude/settings.local.json.tmp.*
