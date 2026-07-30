@@ -71,6 +71,30 @@ KNOWN_IDS = {
 DTT_RATE_PER_1000 = 1.10
 
 
+class UnexpectedResponse(RuntimeError):
+    """An XHR returned HTTP 200, but not the JSON or fragment the app would get.
+
+    Eagle answers a request it does not accept as an app-level XHR by serving the
+    SPA wrapper (or the disclaimer gate) with a 200 status. Checking only the
+    status code therefore treats a total failure as a success: the searchPost that
+    sets server-side search state silently no-ops, and the follow-up
+    searchResults request answers some default unfiltered query instead. That is
+    how a month of TDUS — roughly 31 documents (§4) — comes back reporting the
+    result cap: the doc-type filter was never applied at all.
+
+    Same principle as the zero-row guard one level lower down: a response that
+    looks like success and carries no data is a loud failure, not a result.
+    See AI_CONTEXT.md rule 3.
+    """
+
+
+# A response body opening with a full HTML document is the SPA shell, not the
+# fragment or JSON an app XHR receives. Only the head of the body is examined so
+# that a fragment merely *mentioning* these strings is not misread.
+_FULL_DOCUMENT = re.compile(r"<!doctype\s+html|<html[\s>]", re.I)
+_DISCLAIMER_MARKERS = ("I Accept", "g-recaptcha")
+
+
 class ResultCapExceeded(RuntimeError):
     """The server reported more documents than it will return for this window.
 
@@ -362,7 +386,24 @@ class Portal:
         res = self.page.evaluate(js, [url, method, form])
         if res["status"] != 200:
             raise RuntimeError(f"{method} {url} -> HTTP {res['status']}")
-        return res["text"]
+        body = res["text"]
+
+        # A 200 is not evidence the request was accepted as an app XHR. Validate
+        # the SHAPE of the body, or a silently-rejected POST looks like success
+        # and every request after it operates on state that was never set.
+        head = body[:2000]
+        if any(m in head for m in _DISCLAIMER_MARKERS):
+            raise UnexpectedResponse(
+                f"{method} {url} -> disclaimer/CAPTCHA gate. The session is not "
+                "authenticated; re-run with --headed and clear it."
+            )
+        if _FULL_DOCUMENT.search(head):
+            raise UnexpectedResponse(
+                f"{method} {url} -> app shell, not a data fragment. Header "
+                "emulation was not accepted for this endpoint, so this request "
+                "did nothing. See ROADMAP Phase 1."
+            )
+        return body
 
     def get(self, url):
         self._pause()

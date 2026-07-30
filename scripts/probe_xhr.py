@@ -29,7 +29,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import collect_sjc
 from collect_sjc import DOCTYPES, HOST, KNOWN_IDS, SEARCH_ID, parse_results
 
-OUT = Path("debug/xhr_probe")
+ROOT = Path(__file__).resolve().parent.parent
+# Repo-relative, NOT cwd-relative: running this as `python3 probe_xhr.py` from
+# inside scripts/ used to scatter the dumps into scripts/debug/, where nobody
+# looks for them.
+OUT = ROOT / "debug" / "xhr_probe"
 
 
 def say(msg=""):
@@ -65,11 +69,37 @@ def looks_like_app_shell(text):
     return has_doc and "ss-search-row" not in text
 
 
+CAP_MESSAGE = "more documents than the maximum allowed"
+
+
+def classify_body(text):
+    """Name the shape of a response body.
+
+    The earlier version knew only 'grid' and 'app shell', so a legitimate
+    cap-message FRAGMENT — no <html>, no ss-search-row — matched neither and got
+    reported as an unrecognisable failure. It is in fact proof the request
+    reached the search engine.
+    """
+    if not text.strip():
+        return "empty"
+    if looks_like_disclaimer(text):
+        return "disclaimer"
+    if CAP_MESSAGE in text:
+        return "cap"
+    if "ss-search-row" in text:
+        return "grid"
+    if looks_like_app_shell(text):
+        return "shell"
+    return "unknown"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--headed", action="store_true", help="show the browser so the CAPTCHA can be cleared by hand")
     ap.add_argument("--delay", type=float, default=1.5, help="seconds between requests — keep it polite (MVP.md §10)")
     ap.add_argument("--types", default="TDUS", help="which doc type to probe with (default TDUS, ~31/mo)")
+    ap.add_argument("--start", help="window start YYYY-MM-DD (default: first day of last month)")
+    ap.add_argument("--end", help="window end YYYY-MM-DD (default: last day of last month)")
     args = ap.parse_args()
 
     if collect_sjc.sync_playwright is None:
@@ -79,9 +109,10 @@ def main():
 
     label = DOCTYPES.get(args.types.strip(), DOCTYPES["TDUS"])
     # A recently-completed month: recent enough to be populated, old enough to
-    # be fully recorded.
-    end = date.today().replace(day=1) - timedelta(days=1)
-    start = end.replace(day=1)
+    # be fully recorded. Overridable, because a narrow window is the cleanest
+    # test of whether the doc-type filter is applied at all — see check 4.
+    end = date.fromisoformat(args.end) if args.end else date.today().replace(day=1) - timedelta(days=1)
+    start = date.fromisoformat(args.start) if args.start else end.replace(day=1)
 
     say("=" * 72)
     say("XHR PROBE — does Portal.xhr return data, or the app shell?")
@@ -170,34 +201,93 @@ def main():
                             f"dump at {path} against DOCTYPES / KNOWN_IDS.",
                         )
 
-        # ── 3. Does searchPost + searchResults return a grid? ────────────
-        say("\n3. Search path (POST searchPost, GET searchResults?page=1)")
+        # ── 3. Does the POST that sets search state actually take? ────────
+        # Checked on its OWN, before any search. If the POST is silently
+        # rejected, every later request answers a query that was never set — and
+        # the earlier version of this probe could not see that, because it only
+        # looked at what came back from searchResults.
+        say("\n3. Search state (POST searchPost) — does it take?")
+        form_vocab = {label: KNOWN_IDS[label]} if label in KNOWN_IDS else None
+        mode = "id" if form_vocab else "label"
+        dt = KNOWN_IDS[label] if form_vocab else label
+        form = {
+            "field_DocNumID": "",
+            "field_RecDateID_DOT_StartDate": start.strftime("%m/%d/%Y"),
+            "field_RecDateID_DOT_EndDate": end.strftime("%m/%d/%Y"),
+            "field_BothNamesID-containsInput": "Contains Any",
+            "field_BothNamesID": "",
+            "field_GrantorID-containsInput": "Contains Any",
+            "field_GrantorID": "",
+            "field_GranteeID-containsInput": "Contains Any",
+            "field_GranteeID": "",
+            "field_selfservice_documentTypes-containsInput": "Contains Any",
+            "field_selfservice_documentTypes": dt,
+            "field_UseAdvancedSearch": "",
+        }
         try:
-            form_vocab = {label: KNOWN_IDS[label]} if label in KNOWN_IDS else None
-            mode = "id" if form_vocab else "label"
+            post_body = portal.xhr(f"{HOST}/Web/searchPost/{SEARCH_ID}", method="POST", form=form)
+        except collect_sjc.UnexpectedResponse as e:
+            results["search_post"] = verdict(
+                False,
+                "the POST was REJECTED — it did nothing",
+                f"{e}\n"
+                "This is the root failure. Search state is never set, so anything\n"
+                "fetched afterwards answers a DIFFERENT query than the one asked.",
+            )
+        except Exception as e:
+            results["search_post"] = verdict(False, "POST raised", str(e))
+        else:
+            path = dump("02_searchPost.txt", post_body)
+            kind = classify_body(post_body)
+            results["search_post"] = verdict(
+                kind not in ("shell", "disclaimer"),
+                f"POST accepted (response shape: {kind}, {len(post_body)} bytes)",
+                f"dump: {path}",
+            )
+
+        # ── 4. Does the results page carry the query we asked for? ────────
+        say("\n4. Results (GET searchResults?page=1)")
+        try:
             rows = portal.search(label, start, end, mode=mode, vocab=form_vocab)
         except collect_sjc.ResultCapExceeded as e:
-            # A cap is a genuine PASS for this probe: the server understood the
-            # query and answered about volume. The window just needs narrowing.
-            results["search"] = verdict(
-                True,
-                "server returned the result-cap message",
-                f"{e}\nThe XHR path reached the search engine. Narrow the window and re-run.",
+            # NOT a pass. TDUS runs ~31/month (§4), so a single month cannot
+            # legitimately cap. A cap here means the doc-type filter was not
+            # applied and the search matched everything recorded in the window.
+            results["rows"] = verdict(
+                False,
+                "RESULT CAP on a window that cannot legitimately cap",
+                f"{e}\n"
+                f"'{label}' runs about 31 documents/month (MVP.md §4), so hitting\n"
+                "the cap means the doc-type filter was NOT applied and the search\n"
+                "matched every document recorded in the window. Consistent with a\n"
+                "silently-rejected POST above.\n"
+                "Confirm with a narrow window: --start/--end over 2-3 days. If the\n"
+                "rows come back carrying MANY doc types, the filter is being ignored.",
             )
-            results["rows"] = True
+        except collect_sjc.UnexpectedResponse as e:
+            results["rows"] = verdict(False, "results request was rejected", str(e))
         except Exception as e:
-            results["search"] = verdict(False, "search raised", str(e))
-            results["rows"] = False
+            results["rows"] = verdict(False, "search raised", str(e))
         else:
-            results["search"] = verdict(True, "search completed without raising")
             if rows:
+                types = {}
+                for r in rows:
+                    types[r["doc_type"] or "?"] = types.get(r["doc_type"] or "?", 0) + 1
+                only_wanted = set(types) <= {label}
                 results["rows"] = verdict(
-                    True,
-                    f"parsed {len(rows)} rows",
+                    only_wanted,
+                    f"parsed {len(rows)} rows across {len(types)} doc type(s)",
                     "\n".join(
                         f"{r['doc_number']}  {r['recording_date']}  "
                         f"{(r['doc_type'] or '?')[:34]}  page={r.get('page_no')}"
                         for r in rows[:5]
+                    )
+                    + (
+                        ""
+                        if only_wanted
+                        else f"\n\nDOC TYPE MIX: {types}\n"
+                        f"More than '{label}' came back — the doc-type filter is\n"
+                        "being IGNORED. The search is unfiltered."
                     ),
                 )
             else:
@@ -207,54 +297,79 @@ def main():
                     f"Expected roughly 31/month for {label} (MVP.md §4).",
                 )
 
-        # ── 4. Raw grid inspection, whatever the parse said ──────────────
-        say("\n4. Raw result markup")
+        # ── 5. Raw markup, whatever the parse said ───────────────────────
+        say("\n5. Raw result markup")
         try:
             raw_grid = portal.xhr(f"{HOST}/Web/searchResults/{SEARCH_ID}?page=1")
+        except collect_sjc.UnexpectedResponse as e:
+            results["grid_shape"] = verdict(False, "results request was rejected", str(e))
+            raw_grid = None
         except Exception as e:
             results["grid_shape"] = verdict(False, "could not re-fetch page 1", str(e))
-        else:
-            path = dump("02_searchResults_p1.html", raw_grid)
-            if looks_like_disclaimer(raw_grid):
-                results["grid_shape"] = verdict(
-                    False, "page 1 is the DISCLAIMER — session is not authenticated", f"dump: {path}"
-                )
-            elif "ss-search-row" in raw_grid:
+            raw_grid = None
+        if raw_grid is not None:
+            path = dump("03_searchResults_p1.html", raw_grid)
+            kind = classify_body(raw_grid)
+            if kind == "grid":
                 n = len(parse_results(raw_grid))
                 results["grid_shape"] = verdict(
                     True, f"page 1 carries ss-search-row markup ({n} parsed)", f"dump: {path}"
                 )
-            elif looks_like_app_shell(raw_grid):
+            elif kind == "cap":
+                results["grid_shape"] = verdict(
+                    False,
+                    "page 1 is the RESULT-CAP message, not a grid",
+                    "The request DID reach the search engine — this is a real server\n"
+                    "response, not the shell. But the window returned no usable rows.\n"
+                    f"dump: {path}",
+                )
+            elif kind == "disclaimer":
+                results["grid_shape"] = verdict(
+                    False, "page 1 is the DISCLAIMER — session is not authenticated", f"dump: {path}"
+                )
+            elif kind == "shell":
                 results["grid_shape"] = verdict(
                     False,
                     "page 1 is the APP SHELL, not a result fragment",
-                    "This is the documented failure mode: header emulation is not\n"
-                    "enough and Eagle is rendering the SPA wrapper. The UI-automation\n"
-                    f"fallback is required (ROADMAP Phase 1).\ndump: {path}",
+                    "The documented failure mode: header emulation is not enough and\n"
+                    "Eagle is rendering the SPA wrapper. The UI-automation fallback\n"
+                    f"is required (ROADMAP Phase 1).\ndump: {path}",
                 )
             else:
                 results["grid_shape"] = verdict(
-                    False, "page 1 is neither a grid nor a recognisable shell", f"Inspect it by hand: {path}"
+                    False, f"page 1 shape is '{kind}' — unrecognised", f"Inspect it by hand: {path}"
                 )
 
         ctx.close()
 
     # ── Verdict ─────────────────────────────────────────────────────────
     say("\n" + "=" * 72)
-    core = ["vocab_json", "search", "rows", "grid_shape"]
+    core = ["vocab_json", "search_post", "rows", "grid_shape"]
     ok = all(results.get(k) for k in core)
     if ok:
         say("VERDICT: the XHR path WORKS.")
-        say("  Portal.xhr returns JSON and real result markup. ROADMAP Phase 1's")
-        say("  automation question is answered — no UI-automation fallback needed.")
+        say("  Portal.xhr returns JSON and real result markup, the POST takes, and")
+        say("  the doc-type filter is applied. ROADMAP Phase 1's automation")
+        say("  question is answered — no UI-automation fallback needed.")
         say("  Next: capture fixtures (scripts/capture_fixtures.py --headed), then")
         say("  run one TDUS month with details for Phase 2.")
     else:
         failed = [k for k in core if not results.get(k)]
         say(f"VERDICT: the XHR path DOES NOT work. Failing checks: {', '.join(failed)}")
-        say("  Switch to UI automation: fill the form, click Search, read the DOM,")
-        say("  page through. ~31 records/month makes the slow path affordable")
-        say("  (MVP.md §5.1, §11.1).")
+        # Name the mechanism, not just the outcome — they lead to different fixes.
+        if results.get("search_post") is False:
+            say("  ROOT CAUSE: the searchPost is silently rejected, so search state is")
+            say("  never set and every later request answers a query nobody asked for.")
+            say("  Header emulation is insufficient. Switch to UI automation: fill the")
+            say("  form, click Search, read the DOM, page through. ~31 records/month")
+            say("  makes the slow path affordable (MVP.md §5.1, §11.1).")
+        elif results.get("vocab_json") is False:
+            say("  The vocabulary endpoint serves the app shell, so header emulation is")
+            say("  at best partial. Treat KNOWN_IDS as the only source of doc-type ids")
+            say("  and confirm whether the search path independently works.")
+        else:
+            say("  Switch to UI automation: fill the form, click Search, read the DOM,")
+            say("  page through (MVP.md §5.1, §11.1).")
         say(f"  Read the dumps in {OUT}/ before changing any code.")
     if results.get("vocab_orientation") is False:
         say("\nALSO: doctype_vocab()'s key orientation is wrong for main()'s usage.")
