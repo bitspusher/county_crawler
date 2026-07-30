@@ -254,6 +254,15 @@ def log(m):
 
 MONEY = re.compile(r"\$?\s*([\d,]+\.?\d*)")
 DOCNUM = re.compile(r"\b(\d{4}-\d{5,7})\b")
+DATE_RE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
+
+# Popup markup (cart, print, session-timeout) is hidden by CSS but still in
+# the raw HTML, so its text can bleed into whatever field was mid-collection.
+JUNK_LINE = re.compile(
+    r"^(print options|warning|ok|cancel|continue\?|"
+    r"if you navigate away from this page)",
+    re.I,
+)
 
 
 def _lines(html_fragment):
@@ -274,6 +283,16 @@ def _lines(html_fragment):
 
 def parse_results(html):
     """Split the grid into records. Returns list of dicts."""
+    # Each chunk is bounded at the NEXT row's start, so the LAST row's chunk
+    # runs to the end of the document and sweeps in the shared trailing
+    # template. That is how 'Print Options'/'Warning'/'Cancel' get stored as
+    # grantee names on the final row of every page. Cut it off first.
+    end_m = re.search(
+        r'<div[^>]*\bid="Cart-popup-Div"' r'|<div[^>]*\bclass="ss-footer[ "]',
+        html,
+    )
+    if end_m:
+        html = html[: end_m.start()]
     chunks = re.split(r'(?=<[^>]*class="[^"]*ss-search-row[^"]*")', html)
     out = []
     for ch in chunks[1:]:
@@ -304,8 +323,14 @@ def parse_results(html):
                 break
         role = None
         for j, l in enumerate(lines):
-            if re.match(r"^Recording Date$", l, re.I) and j + 1 < len(lines):
-                rec["recording_date"] = lines[j + 1]
+            if re.match(r"^Recording Date$", l, re.I):
+                # When the cell renders empty, _lines() drops it and everything
+                # shifts by one, so the next line is "Grantor" not a date. Look
+                # ahead for something date-shaped instead of trusting position.
+                for k in range(j + 1, min(j + 4, len(lines))):
+                    if DATE_RE.match(lines[k]):
+                        rec["recording_date"] = lines[k]
+                        break
             elif re.match(r"^Grantor(\s*\(\d+\))?$", l, re.I):
                 role = "grantor"
             elif re.match(r"^Grantee(\s*\(\d+\))?$", l, re.I):
@@ -315,7 +340,7 @@ def parse_results(html):
             elif role and not DOCNUM.search(l) and l not in ("T", "S", "N"):  # noqa: SIM102
                 # Kept nested: the date guard is a distinct classification
                 # step, not part of deciding whether the line is a party.
-                if not re.match(r"^\d{2}/\d{2}/\d{4}$", l):
+                if not DATE_RE.match(l) and not JUNK_LINE.match(l):
                     rec[role].append(l)
         out.append(rec)
     return out
@@ -323,6 +348,16 @@ def parse_results(html):
 
 def parse_detail(html):
     """Label/value extraction from the document detail view."""
+    # Bound to real content first: hidden popups are in the DOM, and a
+    # name-collecting loop that meets no stop-label wanders into them.
+    start_m = re.search(r'<div[^>]*\bid="documentIndexingInformation"', html)
+    if start_m:
+        tail = html[start_m.start() :]
+        end_m = re.search(
+            r'<div[^>]*\bclass="ss-image-margins"' r'|<div[^>]*\bid="Cart-popup-Div"',
+            tail,
+        )
+        html = tail[: end_m.start()] if end_m else tail
     lines = _lines(html)
     d = {
         "doc_number": None,
@@ -366,7 +401,7 @@ def parse_detail(html):
         elif re.match(r"^(Names|Legal|Related|Images?)\b", l, re.I):
             role = None
         elif role:
-            if l.rstrip(":").strip().lower() in labels:
+            if l.rstrip(":").strip().lower() in labels or JUNK_LINE.match(l):
                 role = None
             else:
                 d[role].append(l)
