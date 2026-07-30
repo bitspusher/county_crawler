@@ -22,6 +22,10 @@ Design constraints, from the spec:
 
 Session: reuses ./.browser_profile from the probe, so the CAPTCHA stays solved.
 
+NOTE: the disclaimer/CAPTCHA gate is section-scoped. Clearing it on /Web/ does not
+clear it on /Web/search/{SEARCH_ID} — the search/XHR endpoints check independently.
+This file checks and clears both before doing any real work.
+
     python collect_sjc.py --start 2026-06-01 --end 2026-07-31 --headed
     python collect_sjc.py --report          # read-only, no network
 """
@@ -167,6 +171,13 @@ def log(m):
     print(f"[collect] {m}", flush=True)
 
 
+def _fmt_date(d):
+    """M/D/YYYY, no zero-padding — matches the real browser's captured payload
+    ("6/1/2026"), not strftime's "%m/%d/%Y" ("06/01/2026"). Probably harmless
+    either way, but this matches reality exactly rather than assuming."""
+    return f"{d.month}/{d.day}/{d.year}"
+
+
 # --------------------------------------------------------------------------
 # Parsers. Text-line based on purpose: Eagle's markup is jQuery-Mobile div soup
 # that changes between releases, but the rendered label/value text is stable.
@@ -174,6 +185,15 @@ def log(m):
 
 MONEY = re.compile(r"\$?\s*([\d,]+\.?\d*)")
 DOCNUM = re.compile(r"\b(\d{4}-\d{5,7})\b")
+DATE_RE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
+
+# Every document page also carries cart/print/session-timeout popup markup,
+# hidden via CSS but still present in the raw HTML. _lines() strips tags
+# without knowing what's display:none, so this text can bleed into whatever
+# field was mid-collection (usually grantor/grantee) if it isn't excluded.
+JUNK_LINE = re.compile(
+    r"^(print options|warning|ok|cancel|continue\?|"
+    r"if you navigate away from this page)", re.I)
 
 
 def _lines(html_fragment):
@@ -192,6 +212,18 @@ def _lines(html_fragment):
 
 def parse_results(html):
     """Split the grid into records. Returns list of dicts."""
+    # Every page on this site shares the same trailing template — cart popup,
+    # password-change popup, session-timeout popup, footer — after whatever
+    # the page's actual content is. The row-splitting below only bounds each
+    # chunk at the *next* row's start, so the very last row's chunk runs
+    # unbounded to the end of the whole document and sweeps in that trailing
+    # template markup (this is the same "Print Options / Warning / Cancel"
+    # popup text seen contaminating parse_detail, just via the results grid
+    # instead of the document page). Cut it off before splitting.
+    end_m = re.search(r'<div[^>]*\bid="Cart-popup-Div"'
+                      r'|<div[^>]*\bclass="ss-footer[ "]', html)
+    if end_m:
+        html = html[:end_m.start()]
     chunks = re.split(r'(?=<[^>]*class="[^"]*ss-search-row[^"]*")', html)
     out = []
     for ch in chunks[1:]:
@@ -216,8 +248,17 @@ def parse_results(html):
                 break
         role = None
         for j, l in enumerate(lines):
-            if re.match(r"^Recording Date$", l, re.I) and j + 1 < len(lines):
-                rec["recording_date"] = lines[j + 1]
+            if re.match(r"^Recording Date$", l, re.I):
+                # The value normally sits on the very next line. But if the cell
+                # rendered empty, _lines() drops it entirely (it only keeps
+                # truthy lines) and everything after shifts by one — the next
+                # line becomes "Grantor" instead of a date. Search a short
+                # distance forward for something date-shaped instead of
+                # blindly trusting position.
+                for k in range(j + 1, min(j + 4, len(lines))):
+                    if DATE_RE.match(lines[k]):
+                        rec["recording_date"] = lines[k]
+                        break
             elif re.match(r"^Grantor(\s*\(\d+\))?$", l, re.I):
                 role = "grantor"
             elif re.match(r"^Grantee(\s*\(\d+\))?$", l, re.I):
@@ -225,7 +266,7 @@ def parse_results(html):
             elif re.match(r"^(View|Recording Date)$", l, re.I):
                 role = None
             elif role and not DOCNUM.search(l) and l not in ("T", "S", "N"):
-                if not re.match(r"^\d{2}/\d{2}/\d{4}$", l):
+                if not DATE_RE.match(l) and not JUNK_LINE.match(l):
                     rec[role].append(l)
         out.append(rec)
     return out
@@ -233,6 +274,18 @@ def parse_results(html):
 
 def parse_detail(html):
     """Label/value extraction from the document detail view."""
+    # Bound to the real content section first. The full page also renders
+    # cart, password-change, and session-timeout popups (hidden via CSS, not
+    # removed from the DOM) — without this, a name-collecting loop that never
+    # hits a recognized stop-label can wander straight into "Print Options /
+    # Warning / OK / Cancel" text from one of those popups and silently
+    # append it as if it were a grantor/grantee name.
+    start_m = re.search(r'<div[^>]*\bid="documentIndexingInformation"', html)
+    if start_m:
+        tail = html[start_m.start():]
+        end_m = re.search(r'<div[^>]*\bclass="ss-image-margins"'
+                          r'|<div[^>]*\bid="Cart-popup-Div"', tail)
+        html = tail[:end_m.start()] if end_m else tail
     lines = _lines(html)
     d = {"doc_number": None, "recording_date": None, "num_pages": None,
          "recording_fee": None, "tax_amount": None, "tax_raw": None,
@@ -267,7 +320,7 @@ def parse_detail(html):
         elif re.match(r"^(Names|Legal|Related|Images?)\b", l, re.I):
             role = None
         elif role:
-            if l.rstrip(":").strip().lower() in labels:
+            if l.rstrip(":").strip().lower() in labels or JUNK_LINE.match(l):
                 role = None
             else:
                 d[role].append(l)
@@ -362,21 +415,40 @@ class Portal:
             return dict(KNOWN_IDS)
         return {it["value"]: it["name"] for it in items}
 
-    def search(self, doctype_value, start, end, mode="id", vocab=None):
-        """Two-step: POST sets state, GET reads the grid."""
-        dt = vocab[doctype_value] if (mode == "id" and vocab) else doctype_value
+    def search(self, doctype_label, start, end, vocab=None):
+        """Two-step: POST sets state, GET reads the grid.
+
+        The document-type control is not a single form field — it's a token/
+        autocomplete widget backed by five coordinated fields. Captured live from
+        the browser against a real submission:
+
+            field_selfservice_documentTypes-holderInput:   41                       (numeric id)
+            field_selfservice_documentTypes-holderValue:   Notice Of Trustees Sale  (display label)
+            field_selfservice_documentTypes-searchInput:   notice of trustees sale  (lowercase text)
+            field_selfservice_documentTypes-containsInput: Contains Any             (mode flag)
+            field_selfservice_documentTypes:               notice of trustees sale  (bare, same text)
+
+        The old code sent only the bare field with a single value and guessed
+        between "id" and "label" — neither is a valid filter on its own, so the
+        server silently ignored it and returned every doc type unfiltered. There's
+        no more guessing needed now that the real shape is known.
+
+        Also matching reality: the live payload omits field_DocNumID,
+        field_BothNamesID, field_GrantorID, and field_GranteeID entirely (not even
+        as blank strings), so those are dropped here too.
+        """
+        doctype_id = (vocab or {}).get(doctype_label) or KNOWN_IDS.get(doctype_label)
+        if not doctype_id:
+            raise RuntimeError(f"no known document-type id for {doctype_label!r}")
+        search_text = doctype_label.lower()
         form = {
-            "field_DocNumID": "",
-            "field_RecDateID_DOT_StartDate": start.strftime("%m/%d/%Y"),
-            "field_RecDateID_DOT_EndDate": end.strftime("%m/%d/%Y"),
-            "field_BothNamesID-containsInput": "Contains Any",
-            "field_BothNamesID": "",
-            "field_GrantorID-containsInput": "Contains Any",
-            "field_GrantorID": "",
-            "field_GranteeID-containsInput": "Contains Any",
-            "field_GranteeID": "",
+            "field_RecDateID_DOT_StartDate": _fmt_date(start),
+            "field_RecDateID_DOT_EndDate": _fmt_date(end),
+            "field_selfservice_documentTypes-holderInput": doctype_id,
+            "field_selfservice_documentTypes-holderValue": doctype_label,
+            "field_selfservice_documentTypes-searchInput": search_text,
             "field_selfservice_documentTypes-containsInput": "Contains Any",
-            "field_selfservice_documentTypes": dt,
+            "field_selfservice_documentTypes": search_text,
             "field_UseAdvancedSearch": "",
         }
         self.xhr(f"{HOST}/Web/searchPost/{SEARCH_ID}", method="POST", form=form)
@@ -513,6 +585,8 @@ def main():
             user_data_dir=str(PROFILE), headless=not args.headed,
             viewport={"width": 1400, "height": 900})
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
+
+        # --- Checkpoint 1: root page ---
         page.goto(f"{HOST}/Web/", wait_until="domcontentloaded", timeout=45000)
         page.wait_for_timeout(2500)
         if "I Accept" in page.content():
@@ -520,6 +594,17 @@ def main():
                 ctx.close()
                 sys.exit("Disclaimer/CAPTCHA gate. Rerun with --headed and clear it.")
             input(">>> Clear the disclaimer/CAPTCHA, then press Enter...\n")
+
+        # --- Checkpoint 2: search page ---
+        # The gate is section-scoped. Clearing it on /Web/ does not clear it on
+        # /Web/search/{SEARCH_ID} — the search/XHR endpoints check independently.
+        page.goto(f"{HOST}/Web/search/{SEARCH_ID}", wait_until="domcontentloaded", timeout=45000)
+        page.wait_for_timeout(2500)
+        if "I Accept" in page.content() or "recaptcha" in page.content().lower():
+            if not args.headed:
+                ctx.close()
+                sys.exit("Disclaimer/CAPTCHA gate on search page. Rerun with --headed and clear it.")
+            input(">>> Clear the disclaimer/CAPTCHA on the SEARCH page, then press Enter...\n")
 
         portal = Portal(ctx, page, delay=args.delay, debug=args.debug)
 
@@ -534,19 +619,12 @@ def main():
         for label in want:
             for qs, qe in months(start, end):
                 log(f"{label}  {qs} .. {qe}")
-                mode_used, rows = "id", []
+                rows = []
                 try:
-                    rows = portal.search(label, qs, qe, mode="id", vocab=vocab)
+                    rows = portal.search(label, qs, qe, vocab=vocab)
                 except RuntimeError as e:
                     log(f"  ! {e}")
-                if not rows:
-                    log("  0 rows with numeric id; retrying with the label string")
-                    try:
-                        rows = portal.search(label, qs, qe, mode="label")
-                        mode_used = "label"
-                    except RuntimeError as e:
-                        log(f"  ! {e}")
-                log(f"  {len(rows)} rows (doctype sent as {mode_used})")
+                log(f"  {len(rows)} rows")
                 if not rows:
                     log("  !! ZERO ROWS — expected ~30/month. Investigate before trusting.")
                 store_index(con, rows, 0, qs, qe)
