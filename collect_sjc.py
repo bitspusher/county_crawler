@@ -701,18 +701,27 @@ def report_sections(con, days=7, limit=40):
     if not rows:
         print("  (no notices of trustee's sale collected yet)")
     else:
-        print(f"  {'DOC NUMBER':14s} {'RECORDED':11s} {'AUCTION DATE':13s} PROPERTY / OWNER")
+        # NOT labelled "owner". Live data (June 2026) shows the grantor list
+        # carries the foreclosure TRUSTEE alongside the homeowner — e.g.
+        # "MOLINA EDWARD J | PRIME RECON LLC", "NOYOLA MARGARITA | ZBS LAW LLP".
+        # The index does not label party roles, so calling this column "owner"
+        # asserts a distinction the data does not make. AI_CONTEXT.md rule 8.
+        print(f"  {'DOC NUMBER':14s} {'RECORDED':11s} {'AUCTION DATE':13s} PARTIES ON THE NOTICE")
         for dn, rd, grantors in rows[:limit]:
-            owner = (grantors or "unavailable")[:44]
+            parties = (grantors or "unavailable")[:52]
             # Neither of these is in the recorder index (§6.3, and the index
             # carries the notice's recording date only, not the sale date).
-            print(f"  {dn:14s} {(rd or 'unavailable'):11s} {'unavailable':13s} {owner}")
+            print(f"  {dn:14s} {(rd or 'unavailable'):11s} {'unavailable':13s} {parties}")
         if len(rows) > limit:
             print(f"  ... and {len(rows) - limit} more")
     print("\n  Address and APN: UNAVAILABLE — not present anywhere in the recorder")
-    print("  index or detail views (MVP.md §6.3). Owner is the grantor name from the")
-    print("  grantor/grantee index, which the recorder states is a finding aid only,")
-    print("  not a substitute for a title search.")
+    print("  index or detail views (MVP.md §6.3).")
+    print("  PARTIES is the raw grantor list from the grantor/grantee index, and it")
+    print("  mixes roles: the homeowner AND the foreclosure trustee appear together")
+    print("  (e.g. '... | PRIME RECON LLC', '... | ZBS LAW LLP'), because the index")
+    print("  does not label who is who. Do not read the first name as the owner —")
+    print("  that ordering is not guaranteed. The recorder states this index is a")
+    print("  finding aid only, not a substitute for a title search.")
     print("  Auction date: UNAVAILABLE — the index carries the notice's recording")
     print("  date, not the sale date.")
     print("  WARNING: rescissions and cancellations are collected but not yet joined")

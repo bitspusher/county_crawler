@@ -66,6 +66,29 @@ basic form), `collect_sjc.py` (the collector).
    interrupted window still leaves a record. A collected-but-empty window is a row with
    `rows_indexed=0`; a never-collected window is the absence of a row.
 
+### New gaps, found by running it
+
+10. **Section A mixes party roles.** The grantor list carries the foreclosure
+    trustee alongside the homeowner — "MOLINA EDWARD J | PRIME RECON LLC",
+    "NOYOLA MARGARITA | ZBS LAW LLP", "IBRAHIM HANNA | ENTRA DEFAULT SOLUTIONS
+    LLC" — and the index does not label who is who. The column has been renamed
+    from "PROPERTY / OWNER" to "PARTIES ON THE NOTICE" so it stops asserting a
+    distinction the data does not make, but for a lead list the distinction is
+    the point: with no address or APN (§6.3), the owner name is the only
+    identifier there is. Options, in increasing order of ambition: a
+    known-trustee name list; a token heuristic (DEFAULT / RECON / FORECLOSURE /
+    LAW LLP / SOLUTIONS); or the detail view, which may label roles explicitly.
+    The trustee is itself worth surfacing — it is who you call to ask about a
+    sale — so this is a split, not a discard.
+
+11. **Repeat-buyer analysis needs history, not a month.** All 20 June sales have
+    distinct grantees, so `v_repeat_buyers` shows nothing but count-1 rows. §7.3's
+    thin-volume warning made concrete: at ~20 completed sales/month the customer
+    list only means something across many months. Backfilling is cheap (~10
+    windows/month), so this argues for doing Phase 4's backfill early. Note also
+    that "H DEOL PROP LLC" and "DEOL HARMINDER" are visibly related and do not
+    group — the exact-string limitation of §8, observed rather than predicted.
+
 ### New gap, found while closing the above
 
 9. **`doctype_vocab()`'s key orientation may be inverted.** It builds
@@ -123,25 +146,65 @@ and neither waits on the automation issue.
 
 ## Phase 2 — validate the two derivations
 
-One ~31-record TDUS pass answers both.
+**Ran June 2026 on 2026-07-29. 193 documents kept, 20 TDUS with details.**
 
-- [ ] **Run one month of TDUS with details.** (§11.2)
-- [ ] **Check the §11926 split.** Expect bimodal: a cluster at exactly $0.00, a spread
-      of real values. If everything carries tax, fall back to grantee-name
-      classification and rewrite `sale_class`. (§6.5, §8.1)
-- [ ] **Spot-check derived prices against known sales**, including at least one Stockton
-      property, to settle the charter-city question. If the recorder's Tax Amount
-      captures only the county's $0.55, Stockton is wrong by 2× and
-      `DTT_RATE_PER_1000` needs to become city-dependent. It lives in a view, so this
-      is a rebuild, not a re-scrape. (§6.4, §11.3)
+- [x] **Run one month of TDUS with details.** (§11.2)
+- [x] **Check the §11926 split — CONFIRMED.** Exactly bimodal, and the split lands
+      on the distinction it was supposed to: 10 at `$0.00` and 10 carrying real
+      tax, with the zero-tax grantees being lenders and servicers almost without
+      exception (FIFTH THIRD BK, FREEDOM MTG CORP, NEWREZ LLC | SHELLPOINT MTG
+      SERV, US BK TR | LHOME MTG TRUST, WILMINGTON SAV FUND SOC TR, LAKEVIEW LN
+      SERV LLC, DPS FIN CO, FARMERS & MERCHANTS INVEST CORP, JORVA PARTNERS B LP)
+      and the taxed grantees being investors and individuals (SGR INVEST LLC,
+      NEXT DOOR NEIGHBOR HOMES LLC, H DEOL PROP LLC, KAUR MANJIT, SINGH SUKHBIR,
+      TIER2KEEPERS LLC, SILVA RUDOLPH D, VANZETTI PROP LP, NEIGHBOR TO NEIGHBOR
+      HOMES LLC). `sale_class` does not need replacing. (§6.5, §8.1)
+      - One exception worth watching: `LARSEN ROGER E TR | LARSEN ELIZABE` at
+        $0.00 reads as an individual rather than an institution. Most likely a
+        private/hard-money lender credit-bidding, which the split still
+        classifies correctly, but a growing count here would mean the
+        lender-vs-investor reading is leakier than it looks.
+- [x] **Rate corroborated, though not by the means originally planned.** A
+      Stockton spot-check is still impossible without an address (§6.3), but the
+      data carries its own check: all 10 derived prices land on exact $500
+      boundaries, which is what §6.4's "rounded up to the nearest $500 before the
+      rate applies" predicts. Under the 2× hypothesis the true prices would be
+      half these, and for 3 of the 10 that produces a non-$500 multiple —
+      inconsistent with the county's own rounding rule. So `DTT_RATE_PER_1000 =
+      1.10` is right for these documents.
+      - Not fully closed: this says nothing about *which* documents are in
+        Stockton. If the city-tax structure differs there, the discrepancy would
+        show up as prices that are systematically off — and, being a view, it
+        stays a rebuild rather than a re-scrape. Revisit if the parcel bridge
+        (Phase 5) ever supplies addresses.
+- [x] **Volumes corroborate §4's table.** June: 43 NOTS (§4 says 35/mo), 20 TDUS
+      (31), 47 Rescission Of Default (55), 83 Cancellation/Termination (113).
+      Same order of magnitude throughout, TDUS on the low side.
 
 ## Phase 3 — make Section A correct
 
-- [ ] Collect `Rescission Of Default` and `Cancellation/Termination`; resolve their doc
-      type IDs from the live vocabulary. (§3, Gap 1)
-- [ ] Join them out of `v_upcoming` by matching party and recording sequence.
-- [ ] State the residual risk in the output: oral postponements at the sale never reach
-      the recorder, so no amount of collection catches them. (§3)
+**Now the highest-value work, and more urgent than it looked.** June 2026
+returned 43 NOTS against 47 Rescission Of Default and 83
+Cancellation/Termination — three times as many cancelling documents as notices.
+Section A is currently publishing a list of which an unknown but plainly large
+fraction will not happen.
+
+- [x] Collect `Rescission Of Default` and `Cancellation/Termination`. Free with
+      the unfiltered sweep; both are in `KEEP_DOCTYPES` and 130 of them are
+      already in the database. No doc-type IDs needed — the portal ignores the
+      filter. (§3, Gap 1)
+- [ ] **Determine what a rescission/cancellation can be joined ON.** This is the
+      open design question and it needs one cheap probe: fetch the detail view
+      for a few of the 130 already-collected documents and see whether it
+      references the original document number. If it does, the join is exact. If
+      it does not, the only available key is party name plus recording sequence,
+      which is fuzzy and will need a stated error rate.
+      - Note `DETAIL_DOCTYPES` currently fetches details for TDUS only, so no
+        rescission details have been fetched yet. Widening it is a one-line
+        change costing ~130 requests/month.
+- [ ] Join them out of `v_upcoming` once the key is known.
+- [x] State the residual risk in the output — oral postponements at the sale never
+      reach the recorder. Already carried in Section A's caveats. (§3)
 
 ## Phase 4 — the weekly output
 

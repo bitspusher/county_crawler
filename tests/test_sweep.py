@@ -278,6 +278,34 @@ def test_report_states_unavailable_fields_rather_than_omitting_them(db, add_tdus
     assert "Auction date: UNAVAILABLE" in out
 
 
+def test_section_a_does_not_call_the_grantor_list_the_owner(db, add_tdus, capsys):
+    """Live June 2026 data showed the grantor list carries the foreclosure
+    TRUSTEE alongside the homeowner — "MOLINA EDWARD J | PRIME RECON LLC" — and
+    the index does not label roles. Labelling that column "owner" asserts a
+    distinction the data does not make (AI_CONTEXT.md rule 8)."""
+    add_tdus(
+        "2026-000002",
+        tax_amount=None,
+        doc_type=DOCTYPES["NOTS"],
+        grantor="MOLINA EDWARD J | PRIME RECON LLC",
+    )
+    report_sections(db)
+    out = capsys.readouterr().out
+    assert "PARTIES ON THE NOTICE" in out
+    assert "PROPERTY / OWNER" not in out
+    # And the caveat has to explain WHY, or the rename is just cosmetic.
+    assert "foreclosure trustee" in out
+    assert "does not label who is who" in out
+
+
+def test_section_a_does_not_promise_the_first_party_is_the_owner(db, add_tdus, capsys):
+    """Trustees did appear last in every observed sample, but ordering is not
+    documented anywhere and one counter-example would silently mislabel a lead."""
+    add_tdus("2026-000002", tax_amount=None, doc_type=DOCTYPES["NOTS"])
+    report_sections(db)
+    assert "that ordering is not guaranteed" in capsys.readouterr().out
+
+
 def test_report_carries_the_derivation_caveats(db, add_tdus, capsys):
     add_tdus("2026-000001", tax_amount=451.00)
     report_sections(db)
