@@ -143,8 +143,65 @@ def main():
 
         portal = collect_sjc.Portal(ctx, page, delay=args.delay, debug=False)
 
-        # ── 2. Does the vocabulary endpoint return JSON? ─────────────────
-        say("\n2. Vocabulary endpoint (GET .../documentTypes/...)")
+        # ── 2. What does the form ACTUALLY post? ─────────────────────────
+        # The decisive check once the search path is known to work but a filter
+        # is being dropped: read the real control names off the live DOM instead
+        # of trusting the field names the collector was written against. A wrong
+        # field name is silently ignored by the server — no error, just an
+        # unfiltered search.
+        say("\n2. Search form controls (what field names does the form really use?)")
+        try:
+            portal.on_search_page()
+            fields = page.evaluate("""() => {
+                const out = [];
+                document.querySelectorAll('input[name], select[name], textarea[name]').forEach(el => {
+                    const rec = {name: el.name, tag: el.tagName.toLowerCase(), type: el.type || null};
+                    if (el.tagName.toLowerCase() === 'select') {
+                        rec.optionCount = el.options.length;
+                        rec.sampleOptions = Array.from(el.options).slice(0, 6)
+                            .map(o => ({value: o.value, text: o.text}));
+                    }
+                    out.push(rec);
+                });
+                return out;
+            }""")
+        except Exception as e:
+            results["form_fields"] = verdict(False, "could not read the form DOM", str(e))
+        else:
+            path = dump("00_form_fields.json", json.dumps(fields, indent=2))
+            posted = set(collect_sjc.Portal.SEARCH_FIELDS) if hasattr(collect_sjc.Portal, "SEARCH_FIELDS") else set()
+            live = {f["name"] for f in fields}
+            doctype_controls = [f for f in fields if re.search(r"doc.*type|type.*doc", f["name"], re.I)]
+
+            detail = [f"{len(fields)} named controls; dump: {path}"]
+            if doctype_controls:
+                detail.append("doc-type control(s) on the live form:")
+                for f in doctype_controls:
+                    detail.append(f"  name={f['name']!r}  tag={f['tag']}  type={f['type']}")
+                    if f.get("sampleOptions"):
+                        detail.append(f"    {f['optionCount']} options, first few:")
+                        for o in f["sampleOptions"]:
+                            detail.append(f"      value={o['value']!r}  text={o['text']!r}")
+            else:
+                detail.append("NO control matching /doc.*type/ found — the doc-type")
+                detail.append("selector may be built by JS rather than being a form field.")
+
+            # The name the collector posts, against what the form exposes.
+            COLLECTOR_FIELD = "field_selfservice_documentTypes"
+            if COLLECTOR_FIELD in live:
+                detail.append(f"\n{COLLECTOR_FIELD!r} EXISTS on the form —")
+                detail.append("the name is right, so the VALUE format is what the server rejects.")
+            else:
+                detail.append(f"\n{COLLECTOR_FIELD!r} is NOT on the form.")
+                detail.append("That is why the filter is dropped: the collector posts a field")
+                detail.append("name the server does not recognise, and it is ignored silently.")
+            if posted:
+                detail.append(f"unrecognised names the collector posts: {sorted(posted - live)}")
+
+            results["form_fields"] = verdict(COLLECTOR_FIELD in live, "read the live form controls", "\n".join(detail))
+
+        # ── 3. Does the vocabulary endpoint return JSON? ─────────────────
+        say("\n3. Vocabulary endpoint (GET .../documentTypes/...)")
         try:
             raw = portal.xhr(f"{HOST}/Web/search/documentTypes/{SEARCH_ID}?searchText=&maxValues=1000")
         except Exception as e:
@@ -206,7 +263,7 @@ def main():
         # rejected, every later request answers a query that was never set — and
         # the earlier version of this probe could not see that, because it only
         # looked at what came back from searchResults.
-        say("\n3. Search state (POST searchPost) — does it take?")
+        say("\n4. Search state (POST searchPost) — does it take?")
         form_vocab = {label: KNOWN_IDS[label]} if label in KNOWN_IDS else None
         mode = "id" if form_vocab else "label"
         dt = KNOWN_IDS[label] if form_vocab else label
@@ -239,14 +296,20 @@ def main():
         else:
             path = dump("02_searchPost.txt", post_body)
             kind = classify_body(post_body)
+            detail = [f"dump: {path}"]
+            # Show a short body inline. This response is the server's only word on
+            # whether it accepted the query, and having to go open a 57-byte file
+            # to read it wasted a round trip.
+            if len(post_body) <= 500:
+                detail.append(f"body: {post_body.strip()!r}")
             results["search_post"] = verdict(
                 kind not in ("shell", "disclaimer"),
                 f"POST accepted (response shape: {kind}, {len(post_body)} bytes)",
-                f"dump: {path}",
+                "\n".join(detail),
             )
 
         # ── 4. Does the results page carry the query we asked for? ────────
-        say("\n4. Results (GET searchResults?page=1)")
+        say("\n5. Results (GET searchResults?page=1)")
         try:
             rows = portal.search(label, start, end, mode=mode, vocab=form_vocab)
         except collect_sjc.ResultCapExceeded as e:
@@ -298,7 +361,7 @@ def main():
                 )
 
         # ── 5. Raw markup, whatever the parse said ───────────────────────
-        say("\n5. Raw result markup")
+        say("\n6. Raw result markup")
         try:
             raw_grid = portal.xhr(f"{HOST}/Web/searchResults/{SEARCH_ID}?page=1")
         except collect_sjc.UnexpectedResponse as e:
@@ -346,6 +409,10 @@ def main():
     say("\n" + "=" * 72)
     core = ["vocab_json", "search_post", "rows", "grid_shape"]
     ok = all(results.get(k) for k in core)
+    # The transport working and the QUERY being honoured are separate questions,
+    # and conflating them produced a misleading "switch to UI automation" verdict
+    # when in fact the grid was parsing fine and only one field was being dropped.
+    transport_works = bool(results.get("grid_shape")) and bool(results.get("search_post"))
     if ok:
         say("VERDICT: the XHR path WORKS.")
         say("  Portal.xhr returns JSON and real result markup, the POST takes, and")
@@ -353,23 +420,34 @@ def main():
         say("  question is answered — no UI-automation fallback needed.")
         say("  Next: capture fixtures (scripts/capture_fixtures.py --headed), then")
         say("  run one TDUS month with details for Phase 2.")
+    elif transport_works and results.get("rows") is False:
+        say("VERDICT: the transport WORKS; the doc-type FILTER does not.")
+        say("  searchResults returns real, parseable grid markup and pagination")
+        say("  terminates cleanly, so no UI-automation rewrite is needed. What fails")
+        say("  is narrower: the doc-type field is dropped, so the search is")
+        say("  unfiltered and the date range is doing all the work.")
+        say("  Two ways forward, and check 2 above decides between them:")
+        say("    (a) Fix the field. If the form exposes a different control name or")
+        say("        value format, use it — one page per month instead of ~130.")
+        say("    (b) Collect unfiltered over narrow windows and filter by doc_type")
+        say("        client-side. Costs far more requests, but yields EVERY doc type")
+        say("        in one pass — including the rescissions and cancellations of")
+        say("        ROADMAP Phase 3, at no extra cost.")
     else:
         failed = [k for k in core if not results.get(k)]
         say(f"VERDICT: the XHR path DOES NOT work. Failing checks: {', '.join(failed)}")
-        # Name the mechanism, not just the outcome — they lead to different fixes.
         if results.get("search_post") is False:
             say("  ROOT CAUSE: the searchPost is silently rejected, so search state is")
             say("  never set and every later request answers a query nobody asked for.")
             say("  Header emulation is insufficient. Switch to UI automation: fill the")
             say("  form, click Search, read the DOM, page through. ~31 records/month")
             say("  makes the slow path affordable (MVP.md §5.1, §11.1).")
-        elif results.get("vocab_json") is False:
-            say("  The vocabulary endpoint serves the app shell, so header emulation is")
-            say("  at best partial. Treat KNOWN_IDS as the only source of doc-type ids")
-            say("  and confirm whether the search path independently works.")
+        elif results.get("grid_shape") is False:
+            say("  The results endpoint does not return a usable grid. Switch to UI")
+            say("  automation: fill the form, click Search, read the DOM, page")
+            say("  through (MVP.md §5.1, §11.1).")
         else:
-            say("  Switch to UI automation: fill the form, click Search, read the DOM,")
-            say("  page through (MVP.md §5.1, §11.1).")
+            say("  See the failing checks above before changing any code.")
         say(f"  Read the dumps in {OUT}/ before changing any code.")
     if results.get("vocab_orientation") is False:
         say("\nALSO: doctype_vocab()'s key orientation is wrong for main()'s usage.")
