@@ -20,9 +20,9 @@ SQLite dataset plus CLI reports — no service, no UI.
 
 | File | What it does |
 |---|---|
-| `collect_sjc.py` | The collector. One unfiltered sweep per 3-day window (the portal ignores the doc-type filter — measured 2026-07-29), keeps the four in-scope types via `KEEP_DOCTYPES`, stores append-only observations in `sjc.db`, derives price and sale class in views, and emits the Section A/B report. |
+| `collect_sjc.py` | The collector. One unfiltered sweep per 3-day window (unfiltered on purpose — the sweep returns rescissions for free), keeps the three in-scope types via `KEEP_DOCTYPES`, stores append-only observations in `sjc.db`, derives price and sale class in views, and emits the Section A/B report. |
 | `probe_eagle.py` | The discovery probe that mapped the portal's endpoints and field names. Historical — it drives the S6 basic form; the collector uses S7. Kept for re-probing after a portal release. |
-| `scripts/probe_xhr.py` | Settled ROADMAP Phase 1's automation question (2026-07-29): transport works, doc-type filter is server-ignored. Kept for re-probing after a portal release. |
+| `scripts/probe_xhr.py` | Settled ROADMAP Phase 1's automation question (2026-07-29): the transport works. Kept for re-probing after a portal release. |
 | `scripts/probe_rescission_join.py` | Phase 3's open question: can a rescission be joined to the notice it kills, and what fraction reference a NOTS at all? Needs `--headed` and a collected `sjc.db`. |
 | `scripts/capture_fixtures.py` | Replaces the synthetic test fixtures with live markup, so the parser tests become a correctness check rather than a regression lock. |
 | `scripts/collection_metrics.py` | Deterministic project-health numbers. Safe with no database. |
@@ -75,8 +75,9 @@ rather than a re-collection.
 
 - **No address, no APN.** Not present anywhere in the index or detail views. MVP.md §6.3.
 - **No auction date.** The index carries the notice's recording date only.
-- **Rescissions and cancellations are not yet collected**, so the upcoming list includes
-  sales that will not happen. ROADMAP.md Phase 3.
+- **Rescissions are collected but not yet joined out**, so the upcoming list includes
+  sales that will not happen. ROADMAP.md Phase 3. (`Cancellation/Termination` is
+  deliberately not collected — measured 2026-07-30 to carry no foreclosure signal.)
 - The recorder states the grantor/grantee index is a finding aid. Fine for a lead list,
   not for title work.
 - **`sjc.db` is local and gitignored** — a fresh checkout has no data until you run

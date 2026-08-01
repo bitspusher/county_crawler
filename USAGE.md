@@ -71,12 +71,17 @@ python collect_sjc.py --start 2026-06-01 --end 2026-07-31
 ```
 
 Date range is inclusive and gets split into **3-day windows** internally
-(`--window-days`). Every window is an **unfiltered sweep** — the portal silently
-ignores the doc-type filter (measured 2026-07-29) — and a full unfiltered month
-is ~130 pages, which trips the portal's result cap. The collector keeps only the
-four in-scope types (`KEEP_DOCTYPES`: NOTS, TDUS, Rescission Of Default,
-Cancellation/Termination) on the way into the database, and fetches details only
-for TDUS. You can pass a year; you don't need to loop yourself.
+(`--window-days`). Every window is an **unfiltered sweep**, on purpose: a sweep
+returns `Rescission Of Default` for free, and ROADMAP Phase 3 needs those rows.
+A full unfiltered month is ~130 pages, which trips the portal's result cap —
+hence 3 days. The collector keeps only the three in-scope types (`KEEP_DOCTYPES`:
+NOTS, TDUS, Rescission Of Default) on the way into the database, and fetches
+details only for TDUS. You can pass a year; you don't need to loop yourself.
+
+(The doc-type filter is not broken, contrary to an earlier note here. The
+collector posts one bare field, which the server discards; the browser posts five
+and that filters. Sweeping unfiltered is a choice about what the pass returns,
+not a workaround — see `Portal.search`.)
 
 ### Flags
 
@@ -84,7 +89,7 @@ for TDUS. You can pass a year; you don't need to loop yourself.
 |---|---|---|
 | `--start YYYY-MM-DD` | 30 days ago | Start of the recording-date range |
 | `--end YYYY-MM-DD` | today | End of the range, inclusive |
-| `--types TDUS,NOTS` | `TDUS,NOTS` | **Inert** — kept for compatibility. The portal ignores the doc-type filter, so every sweep is unfiltered and selection uses `KEEP_DOCTYPES` |
+| `--types TDUS,NOTS` | `TDUS,NOTS` | **Inert** — kept for compatibility. Every sweep is unfiltered and selection uses `KEEP_DOCTYPES` |
 | `--window-days N` | `3` | Days per search window. A month unfiltered trips the result cap; 3 days is ~14 pages |
 | `--max-pages N` | `40` | Refuse a window needing more pages than this (read from the POST's `totalPages` before any page is fetched) |
 | `--allow-zero-rows` | off | Accept a zero-row window instead of aborting. Only after checking WHY — a dead session also returns zero |
@@ -93,6 +98,7 @@ for TDUS. You can pass a year; you don't need to loop yourself.
 | `--headed` | off | Show the browser. Required whenever the gate needs clearing |
 | `--delay SECONDS` | `1.5` | Sleep between every request. Leave it alone or raise it |
 | `--report` | off | Read the DB and print. No network at all |
+| `--report-days N` | `7` | Section A shows notices recorded in the last N days. `0` shows every notice collected. The report prints the dates it used and counts what it left out |
 | `--debug` | off | Dump raw responses to `./debug/` |
 
 Every window commits as it finishes, so an interrupted run keeps everything
@@ -156,8 +162,10 @@ repeat buyers.
   Stockton**: if the recorder's Tax Amount captures only the county's half
   there, Stockton prices are understated 2× and nothing in this data can detect
   it (ROADMAP Phase 2).
-- Section A still lists sales that will not happen — rescissions and
-  cancellations are collected but not yet joined out (ROADMAP Phase 3).
+- Section A still lists sales that will not happen — rescissions are collected
+  but not yet joined out (ROADMAP Phase 3).
+- Section A shows the last 7 days of notices by default (`--report-days N`,
+  `0` for all). It says which dates it used and how many notices it left out.
 
 Or query `sjc.db` directly. **Use the views, not the tables** — the tables are raw
 append-only observations with duplicates by design:
@@ -222,13 +230,27 @@ checklist. If a window is *genuinely* empty (verified by hand), re-run with
 
 **`! vocabulary fetch failed ... using known IDs`**
 Expected and harmless — that endpoint always rejects the header emulation. The
-hardcoded IDs (41/22) cover it, and the doc-type filter is server-ignored
+hardcoded IDs (41/22) cover it, and the sweep never queries by type
 anyway.
 
 **`keeping N in scope: {...}`**
-Normal. The sweep retrieves every document type in the window (the portal
-ignores the type filter); this line reports what survived `KEEP_DOCTYPES`.
-~490 documents in, ~36 kept is typical for 3 days.
+Normal. The sweep retrieves every document type in the window (the search is
+unfiltered); this line reports what survived `KEEP_DOCTYPES`.
+~490 documents in, ~20 kept is typical for 3 days.
+
+**`!! PAGE_COUNT_MISMATCH` / `!! ROW_COUNT_SHORT`**
+The window came back with fewer pages or rows than the server's own
+`totalPages` said it had, so it may be **missing documents**. Not fatal — the
+rows in hand are still real — but the window is suspect, and `--report` marks
+it `<< SUSPECT` in the coverage table. Re-run that window; the tables are
+append-only, so re-collecting costs nothing but requests. If it reproduces,
+narrow the window with `--window-days`.
+
+**`!! DUPLICATE_ROWS`**
+The same document came back on two pages of one window. Harmless in itself —
+append-only absorbs it and the views take the latest observation. It is
+reported because a page boundary that repeats a row can also drop one, and
+that failure leaves no other trace.
 
 **`[n/N] 2026-0xxxxx FAILED: ...`**
 One detail fetch failed. It's stored with `fetch_ok=0` and excluded from
@@ -249,9 +271,9 @@ CAPTCHA.
 
 | Probe | Question it answers |
 |---|---|
-| `scripts/probe_xhr.py` | Does the transport still work, and is the doc-type filter still ignored? Run after any suspected portal release. |
-| `scripts/probe_doctype_filter.py --manual` | Which value format (if any) makes the doc-type filter stick — fill the field in the real UI and it reads back what the widget produced. If a format works, collection drops from ~140 pages/month to ~2. |
-| `scripts/probe_rescission_join.py` | ROADMAP Phase 3's open question: do rescission/cancellation details reference the original document number (exact join), and what fraction reference a NOTS at all (real urgency)? Needs a collected `sjc.db`. |
+| `scripts/probe_xhr.py` | Does the transport still work? Run after any suspected portal release. |
+| `scripts/probe_doctype_filter.py --manual` | **Answered 2026-07-30** — the filter needs the browser's full five-field autocomplete payload, and then it works. Kept as a regression check after a portal release. Collection still sweeps unfiltered on purpose, but a working filter is what would make Phase 4's backfill use wider windows. |
+| `scripts/probe_rescission_join.py` | ROADMAP Phase 3's open question: do rescission details reference the original document number (exact join), and what fraction reference a NOTS at all (real urgency)? Needs a collected `sjc.db`. |
 | `scripts/capture_fixtures.py` | Replaces the synthetic test fixtures with live markup. Redact individual names per AI_CONTEXT.md rule 11 before committing. |
 
 `probe_eagle.py` is the original discovery tool that mapped the endpoints. You

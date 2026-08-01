@@ -3,13 +3,20 @@
 
 ROADMAP Phase 3's open design question, and the last thing standing between the
 project and an honest Section A. June 2026 returned 43 Notice Of Trustees Sale
-against 47 Rescission Of Default and 83 Cancellation/Termination — three times as
-many cancelling documents as notices — so an unfiltered upcoming list is
-publishing sales that will not happen (§3 calls this a correctness requirement,
-not a feature).
+against 47 Rescission Of Default, so an unjoined upcoming list is publishing
+sales that will not happen (§3 calls this a correctness requirement, not a
+feature).
 
-All 130 cancelling documents are ALREADY collected; `DETAIL_DOCTYPES` just never
-fetched their detail views. The only unknown is what they can be joined ON:
+Scope narrowed 2026-07-30. This probe originally covered `Cancellation/Termination`
+too, on the 130-document count. That half is now answered and the answer was zero:
+all 83 June cancellations are municipal lien releases, rooftop-solar UCC
+terminations and homebuilder filings, with no foreclosure trustee firm on any of
+them. The type has been dropped from `KEEP_DOCTYPES`, and spending half this
+probe's requests on documents that cannot kill a NOTS would measure nothing. The
+83 already in the database are left alone — the tables are append-only.
+
+The rescissions are ALREADY collected; `DETAIL_DOCTYPES` just never fetched their
+detail views. The only unknown is what they can be joined ON:
 
   * If a rescission's detail references the ORIGINAL document number, the join is
     exact and Phase 3 is a small change.
@@ -40,7 +47,9 @@ from collect_sjc import DOCNUM, HOST, _lines, parse_detail
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "debug" / "rescission_probe"
 
-CANCELLING_TYPES = ("Rescission Of Default", "Cancellation/Termination")
+# Rescissions only. See the module docstring for why Cancellation/Termination
+# was dropped from this probe on 2026-07-30.
+CANCELLING_TYPES = ("Rescission Of Default",)
 
 # Label text that would indicate an explicit back-reference. Collected from the
 # vocabulary Tyler Eagle tends to use; the probe reports ANY label it finds near
@@ -256,12 +265,12 @@ def main():
         say("VERDICT: an EXACT JOIN is possible.")
         say("  Cancelling documents reference the document they act on, and that")
         say("  document is in our dataset. Phase 3 becomes:")
-        say("    1. Widen DETAIL_DOCTYPES to include the cancelling types")
-        say("       (~130 extra detail fetches/month).")
+        say("    1. Widen DETAIL_DOCTYPES to include Rescission Of Default")
+        say("       (~47 extra detail fetches/month).")
         say("    2. Store the referenced document number — a new column on")
         say("       detail_obs, holding a RAW value, not a derived one.")
         say("    3. Exclude from v_upcoming any NOTS referenced by a later")
-        say("       rescission or cancellation.")
+        say("       rescission.")
         say("  No fuzzy matching and no error rate to apologise for.")
         return 0
 

@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
 """probe_doctype_filter.py — find the value format the doc-type field accepts.
 
+ANSWERED 2026-07-30, kept as a regression check. The field needs the FULL
+five-field autocomplete payload the browser sends — `-holderInput` (the numeric
+id), `-holderValue` (the label), `-searchInput`, `-containsInput`, and the bare
+field. Sent that way it filters: June NOTS = 43 documents on one page, June TDUS
+= 20, both pure, against 1,323 documents across 14 pages for an unfiltered
+three-day window. The earlier "the server discards the filter" conclusion was an
+artifact of posting the bare field alone.
+
+Collection still sweeps unfiltered on purpose — the sweep returns
+`Rescission Of Default` for free and Phase 3 needs it — so this probe informs a
+future choice (wider windows for Phase 4's backfill) rather than a pending fix.
+See `Portal.search` and ROADMAP "Resolved since the spec was written".
+
 The 2026-07-29 probe run established that the transport works and the search is
 simply unfiltered: `field_selfservice_documentTypes` exists on the form as a
 **text input** (not a select) with a hidden `-containsInput` companion, so it is

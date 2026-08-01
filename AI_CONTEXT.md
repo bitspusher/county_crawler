@@ -75,17 +75,36 @@ The portal is a county server behind a reCAPTCHA and a disclaimer (§10).
   or automated clicking of the disclaimer.
 - Never fetch from `/Web/cart` or any paid-image path. Index and detail
   metadata only.
-- Short windows (default 3 days) exist to stay under the result cap — the
-  server ignores the doc-type filter, so every sweep is unfiltered and a full
-  month is ~130 pages, which always trips the cap. Do not batch windows wider.
+- Short windows (default 3 days) exist to stay under the result cap. The rule is
+  the cap, not the number: never widen a window past what `--max-pages` will
+  serve, and never answer a cap by widening. Three days is the right default
+  *for an unfiltered sweep*, where a month is ~130 pages and always trips the
+  cap. A design that returns fewer pages per window may legitimately use a wider
+  one — that is a change of default, not a violation of this rule.
+  (Earlier wording made the doc-type filter's brokenness the *reason* for 3-day
+  windows, which would auto-reject a diff that fixed the filter. The filter is
+  in fact fixable: the collector posts one bare
+  `field_selfservice_documentTypes`, which the server discards, while the
+  browser posts five fields — `-holderInput` id, `-holderValue` label,
+  `-searchInput`, `-containsInput`, and the bare field — and that does filter.
+  Collection sweeps unfiltered anyway, on purpose, because the sweep returns
+  `Rescission Of Default` for free; see `Portal.search`.)
 
-## 7. Do not collect `Substitution Of Trustee`
+## 7. Do not collect `Substitution Of Trustee` — or `Cancellation/Termination`
 
-1016 documents/month, and it tracks loan *payoffs*, not distress — servicers
-substitute a trustee immediately before reconveying a paid-off loan (§3). Adding
-it would swamp the product in false positives. `DOCTYPES` holds NOTS (41) and
-TDUS (22); rescissions and cancellations are the only approved additions
-(ROADMAP Phase 3).
+`Substitution Of Trustee` is 1016 documents/month, and it tracks loan *payoffs*,
+not distress — servicers substitute a trustee immediately before reconveying a
+paid-off loan (§3). Adding it would swamp the product in false positives.
+
+`Cancellation/Termination` was collected through June 2026 and then dropped for
+the same reason, measured rather than assumed: all 83 June documents are City of
+Stockton lien releases (34), rooftop-solar UCC terminations (36) and homebuilder
+filings (4), and not one foreclosure trustee firm appears on any of them. It is a
+generic index label carrying no foreclosure signal. Re-adding it needs new
+evidence that it references a NOTS, not the observation that it is voluminous.
+
+`DOCTYPES` holds NOTS (41) and TDUS (22); `Rescission Of Default` is the only
+approved addition (ROADMAP Phase 3), and Phase 3's join is against it alone.
 
 ## 8. Never state a property identifier the data does not contain
 
