@@ -49,9 +49,13 @@ basic form), `collect_sjc.py` (the collector).
 ### Gaps — spec says it, code does not do it
 
 1. ~~**Rescissions and cancellations are not collected.**~~ **Partially closed:
-   collection done, join open.** Both types are in `KEEP_DOCTYPES` and 130 are
-   in the database (Phase 3). `v_upcoming` still has no exclusion join — §3
-   calls that a correctness requirement, and it hangs on Phase 3's probe.
+   collection done, join open — and narrowed to rescissions.** 47 rescissions
+   are in the database and `Rescission Of Default` remains in `KEEP_DOCTYPES`.
+   `Cancellation/Termination` was dropped 2026-07-30 (see Phase 3): its 83 June
+   documents carry no foreclosure signal, so Phase 3's join scope halves. The
+   83 already collected stay in the database — the tables are append-only.
+   `v_upcoming` still has no exclusion join — §3 calls that a correctness
+   requirement, and it hangs on Phase 3's probe.
 2. ~~**No parser tests.**~~ **Partially closed.** There are now 109 tests, including
    both parsers, `Portal.search` driven through a fake page, the derivation views over
    an in-memory DB, and the date-window logic. But §6.2 asks for **captured** fixtures
@@ -68,10 +72,25 @@ basic form), `collect_sjc.py` (the collector).
    run rather than the window is deliberate: a dead session returns zero for *every*
    window. `--allow-zero-rows` is the deliberate escape hatch.
 5. ~~**`report()` is not the §7 output.**~~ **Largely closed.**
-   `report_sections()` emits Section A / Section B over a 7-day window with
-   unavailable fields shown as unavailable, and `report()` leads with it.
+   `report_sections()` emits Section A / Section B with unavailable fields shown
+   as unavailable, and `report()` leads with it. Section A's 7-day window was
+   header text only until 2026-07-30 — the `days` argument had no date
+   predicate behind it, so a June run printed "last 7 days" above notices
+   spanning 06/02–06/30. It now filters, prints the actual date range, counts
+   what it excluded, and takes `--report-days` (0 = all).
    Remaining: exact §7.1/§7.2 field order and CSV export (Phase 4).
 6. **Nothing consumes parcel data (§5.2) or the AG §2924m dataset (§5.3).**
+7a. **Pagination can duplicate, and therefore can skip.** Doc 2026-057938 came
+   back twice in one June window, on pages 8 and 9 — 1 repeat in 1,168 rows. The
+   duplicate is harmless under append-only, but a boundary that repeats a row can
+   also drop one, and a dropped row is invisible: it looks like a document the
+   county never recorded. **Mitigated 2026-07-30**, not fixed: `Portal._reconcile`
+   compares pages walked and rows swept against the server's `totalPages` after
+   each window and records `PAGE_COUNT_MISMATCH` / `ROW_COUNT_SHORT` /
+   `DUPLICATE_ROWS` in `run_log.notes`, flagged in `--report`. Costs no extra
+   requests (`totalPages` arrives with the searchPost). It detects a short window;
+   it does not recover the row.
+
 7. ~~**`page_no` is always 0.**~~ **Closed.** `Portal.search` stamps each row with the
    result page it came from and `store_index` reads it off the row. A row parsed outside
    the pagination walk stores NULL rather than a misleading 0.
@@ -122,13 +141,25 @@ basic form), `collect_sjc.py` (the collector).
 
 - **The automation issue (§5.1) — SETTLED 2026-07-29.** Header emulation works
   for the transport: `searchPost` returns JSON (including `totalPages`) and
-  `searchResults` returns real grid markup at 100 rows/page. What does *not*
-  work is the doc-type filter — the server silently discards it — so collection
-  runs one unfiltered sweep per 3-day window and selects client-side via
-  `KEEP_DOCTYPES`. Only the `documentTypes` vocabulary endpoint still serves the
-  app shell; `KNOWN_IDS` covers it and it no longer matters. No UI-automation
-  fallback is needed. Measured by `scripts/probe_xhr.py`; June 2026 collected
-  end to end on this path.
+  `searchResults` returns real grid markup at 100 rows/page. Collection runs one
+  unfiltered sweep per 3-day window and selects client-side via `KEEP_DOCTYPES`.
+  Only the `documentTypes` vocabulary endpoint still serves the app shell;
+  `KNOWN_IDS` covers it and it no longer matters. No UI-automation fallback is
+  needed. Measured by `scripts/probe_xhr.py`; June 2026 collected end to end on
+  this path.
+- **The doc-type filter is NOT broken — corrected 2026-07-30.** The 2026-07-29
+  "server discards the filter" conclusion was measured with a single-field
+  payload. The field is an autocomplete the browser posts as five fields
+  (`-holderInput` id, `-holderValue` label, `-searchInput`, `-containsInput`,
+  bare field); sending all five filters correctly — June NOTS = 43 docs on one
+  page, June TDUS = 20, both pure, against 1,323 docs across 14 pages for an
+  unfiltered *three-day* window. The sweep stays the default anyway, because
+  `Rescission Of Default` arrives free with it and Phase 3 needs those rows.
+  What changes: a filtered month is ~8 requests against ~150 swept, so **wider
+  windows are now legitimate** if backfill (Phase 4) makes request count the
+  binding constraint. AI_CONTEXT rule 6 previously encoded the bug as the reason
+  for 3-day windows, which would have auto-rejected anyone who fixed it; it has
+  been reworded to bind on the result cap instead.
 
 ---
 
@@ -231,32 +262,44 @@ anything.
       addresses. Being a view, a correction is a rebuild, not a re-scrape.
 - [x] **Volumes corroborate §4's table.** June: 43 NOTS (§4 says 35/mo), 20 TDUS
       (31), 47 Rescission Of Default (55), 83 Cancellation/Termination (113).
-      Same order of magnitude throughout, TDUS on the low side.
+      Same order of magnitude throughout, TDUS on the low side. (Cancellations
+      are no longer collected as of 2026-07-30 — see Phase 3.)
 
 ## Phase 3 — make Section A correct
 
-**Likely high-value — pending one measurement.** June 2026 returned 43 NOTS
-against 47 Rescission Of Default and 83 Cancellation/Termination. The raw 3:1
-ratio overstates the problem by an unknown amount: a `Rescission Of Default`
-rescinds a *Default* (81/mo, §4), most of which never reach a NOTS, and
-`Cancellation/Termination` is a generic index label spanning many instrument
-types. What fraction of the 130 actually kills a NOTS is unmeasured — that
-fraction, not the ratio, should set this phase's priority. If it is small,
-Section A's existing caveat plus a stated cancellation rate may be an adequate
-MVP answer.
+**Scope halved 2026-07-30 — one measurement in, one still open.** June 2026
+returned 43 NOTS against 47 Rescission Of Default and 83
+Cancellation/Termination. The raw 3:1 ratio overstated the problem, and the
+cancellation half of it is now measured at zero: `Cancellation/Termination` is a
+generic index label and none of June's 83 touch a foreclosure (details below).
+That leaves 47 rescissions against 43 notices. Still unmeasured: what fraction
+of those 47 actually kills a NOTS — a `Rescission Of Default` rescinds a
+*Default* (81/mo, §4), most of which never reach a NOTS. That fraction, not the
+ratio, sets this phase's priority. If it is small, Section A's existing caveat
+plus a stated rescission rate may be an adequate MVP answer.
 
-- [x] Collect `Rescission Of Default` and `Cancellation/Termination`. Free with
-      the unfiltered sweep; both are in `KEEP_DOCTYPES` and 130 of them are
-      already in the database. No doc-type IDs needed — the portal ignores the
-      filter. (§3, Gap 1)
+- [x] Collect `Rescission Of Default`. Free with the unfiltered sweep; it is in
+      `KEEP_DOCTYPES` and 47 are already in the database. No doc-type IDs
+      needed — the sweep is unfiltered. (§3, Gap 1)
+- [x] **`Cancellation/Termination` dropped from `KEEP_DOCTYPES` 2026-07-30 —
+      it contributes nothing to this join.** The measurement this phase's
+      priority was waiting on came back zero for cancellations: all 83 June
+      documents are City of Stockton lien releases (34), rooftop-solar UCC
+      terminations (36) and homebuilder filings (4), with not one foreclosure
+      trustee firm on any of them — no Clear Recon, Prime Recon, ZBS Law,
+      Affinia, Entra, National Default, Prestige. Same trap as `Substitution Of
+      Trustee`: high volume, wrong signal. This halves the phase's scope; the
+      47 rescissions look right (MERS plus a lender in nearly every case) and
+      the probe below now runs against those alone.
 - [ ] `[human]` **Run the join/referent probe** —
       `scripts/probe_rescission_join.py --headed` (already written, ~6
       requests). It answers BOTH open questions at once: what a
-      rescission/cancellation can be joined ON (an exact document
-      back-reference, or nothing), and what fraction reference a NOTS at all —
-      which sets this phase's real urgency. `DETAIL_DOCTYPES` fetches TDUS
-      details only today; widening it is a one-line change costing ~130
-      requests/month, once the probe says it is worth it.
+      rescission can be joined ON (an exact document back-reference, or
+      nothing), and what fraction reference a NOTS at all — which sets this
+      phase's real urgency. `DETAIL_DOCTYPES` fetches TDUS details only today;
+      widening it to rescissions is a one-line change costing ~47
+      requests/month (not ~130 — cancellations are no longer collected), once
+      the probe says it is worth it.
 - [ ] `[pipeline]` Join them out of `v_upcoming` once the key is known. Schema
       catch for the implementing spec: `CREATE TABLE IF NOT EXISTS` will not add
       a column to an existing `sjc.db` — an `ALTER TABLE` path is required.

@@ -113,7 +113,7 @@ def test_upcoming_holds_only_notices(db, add_tdus):
 def test_upcoming_does_not_yet_exclude_rescissions(db, add_tdus):
     """Documents the KNOWN defect rather than asserting correct behaviour.
 
-    ROADMAP Gap 1 / Phase 3: rescissions and cancellations are not collected, so
+    ROADMAP Gap 1 / Phase 3: rescissions are collected but not joined out, so
     v_upcoming still lists sales that will not happen. §3 calls this a
     correctness requirement. When Phase 3 lands, this test should be replaced by
     one asserting the exclusion join — and its failure is the signal to do so.

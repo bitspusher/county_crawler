@@ -18,9 +18,11 @@ Design constraints, from the spec:
     transfer-tax assumption never means re-collecting.
   * Deterministic parsing. Zero rows where rows were expected is a loud failure.
   * Polite. Serial requests, sleep between each, short windows (default 3 days)
-    to stay under the server-side result cap — every sweep is unfiltered because
-    the portal discards the doc-type filter (measured 2026-07-29), so selection
-    happens client-side via KEEP_DOCTYPES.
+    to stay under the server-side result cap. Every sweep is unfiltered — not
+    because the filter cannot work, but because the rescissions Phase 3 needs
+    arrive free with the sweep — so selection happens client-side via
+    KEEP_DOCTYPES, and the window has to be short enough that a whole day of
+    county recordings fits under the cap.
 
 Session: reuses ./.browser_profile from the probe, so the CAPTCHA stays solved.
 
@@ -58,24 +60,32 @@ DOCTYPES = {
     "TDUS": "Trustees Deed Under Default",
 }
 
-# The server discards the doc-type filter (measured 2026-07-29), so a sweep
-# retrieves every type recorded in the window — roughly 1300 documents per three
-# days, of which about 36 are relevant. Selection therefore happens here, on the
-# way into the database.
+# A sweep is unfiltered, so it retrieves every type recorded in the window —
+# roughly 1300 documents per three days, of which about 20 are relevant.
+# Selection therefore happens here, on the way into the database.
 #
-# These four are exactly MVP.md §3's "In" scope. Everything else is DISCARDED
-# rather than stored: keeping it would mean collecting `Substitution Of Trustee`
-# at 1016/mo, which AI_CONTEXT.md rule 7 forbids because it tracks payoffs, not
-# distress, and would swamp the dataset with false positives.
+# Everything not listed is DISCARDED rather than stored: keeping it would mean
+# collecting `Substitution Of Trustee` at 1016/mo, which AI_CONTEXT.md rule 7
+# forbids because it tracks payoffs, not distress, and would swamp the dataset
+# with false positives.
 #
-# Rescissions and cancellations arrive free with the sweep, which is what makes
-# ROADMAP Phase 3 reachable — they are the documents that say a recorded sale
-# will not happen.
+# `Rescission Of Default` arrives free with the sweep and is what makes ROADMAP
+# Phase 3 reachable — it is the document that says a recorded sale will not
+# happen. June 2026's 47 look right: MERS plus a lender in nearly every case.
+#
+# `Cancellation/Termination` was collected through June 2026 and then DROPPED,
+# because the measurement said it carries no foreclosure signal at all. All 83
+# June documents partition into City of Stockton lien releases (34), rooftop-solar
+# UCC terminations (36) and homebuilder filings (4); not one foreclosure trustee
+# firm appears on any of them — no Clear Recon, Prime Recon, ZBS Law, Affinia,
+# Entra, National Default, Prestige. It is a generic index label, the same trap as
+# `Substitution Of Trustee`: high volume, wrong signal. Phase 3's join is against
+# rescissions only. The 83 already in the database stay there — the tables are
+# append-only (rule 2) and a stored observation is still a true observation.
 KEEP_DOCTYPES = {
     "Notice Of Trustees Sale",
     "Trustees Deed Under Default",
     "Rescission Of Default",
-    "Cancellation/Termination",
 }
 
 # Only these need a detail fetch. The price derivation (§6.4) reads the
@@ -373,6 +383,10 @@ class Portal:
         self.ctx, self.page, self.delay, self.debug = ctx, page, delay, debug
         self.req = ctx.request
         self._n = 0
+        # Set per search(); initialised here so a caller that catches an
+        # exception out of search() still finds defined attributes.
+        self.total_pages = None
+        self.sweep_warnings = []
 
     def _pause(self):
         time.sleep(self.delay)
@@ -470,16 +484,26 @@ class Portal:
     def search(self, doctype_value, start, end, mode="id", vocab=None, max_pages=40):
         """Two-step: POST sets state, GET reads the grid.
 
-        `doctype_value` may be None to search the window UNFILTERED. Measured
-        live on 2026-07-29: the doc-type field is a text-input autocomplete and
-        the server discards whatever the collector puts in it, so a "filtered"
-        search returns every doc type recorded in the window anyway. Passing None
-        makes that explicit rather than pretending to filter — and one unfiltered
-        sweep replaces one request per type, since they all returned identical
-        results.
+        `doctype_value` may be None to search the window UNFILTERED, which is
+        what collection does. The doc-type selection that actually happens is
+        client-side, in KEEP_DOCTYPES and in the views (`v_upcoming`,
+        `v_auction_sales`).
 
-        The doc-type selection that actually happens is client-side, in the
-        views (`v_upcoming`, `v_auction_sales`) and in KEEP_DOCTYPES below.
+        A non-None value posts a single bare `field_selfservice_documentTypes`,
+        and the server DISCARDS that — the field is a text-input autocomplete
+        whose real payload is five fields (`-holderInput` carrying the id,
+        `-holderValue` the label, `-searchInput`, `-containsInput`, and the bare
+        field). Sending all five does filter: June 2026 NOTS returns 43 documents
+        on one page against 1,323 across 14 pages for an unfiltered *three-day*
+        window. So the filter works and this method does not implement it.
+
+        That is deliberate, not an oversight. The unfiltered sweep returns
+        `Rescission Of Default` for free, and Phase 3's exclusion join needs it;
+        a filtered search would cost a second query per window to get the same
+        rows back. The trade is requests (~150/month swept vs ~8 filtered) against
+        collecting the rescissions at all. Revisit if backfill volume makes the
+        request count the binding constraint — a wider window becomes viable at
+        the same time, since a filtered month is one page, not ~130.
         """
         dt = "" if doctype_value is None else (vocab[doctype_value] if (mode == "id" and vocab) else doctype_value)
         form = {
@@ -504,6 +528,7 @@ class Portal:
         # window was too wide" into "refuse the window up front", and surfaces
         # server-side validation complaints that would otherwise be invisible.
         self.total_pages = None
+        self.sweep_warnings = []
         try:
             meta = json.loads(post_body)
         except json.JSONDecodeError:
@@ -522,6 +547,7 @@ class Portal:
                     )
 
         rows, page = [], 1
+        pages_walked, page_size = 0, None
         while True:
             html = self.xhr(f"{HOST}/Web/searchResults/{SEARCH_ID}?page={page}&_={int(time.time() * 1000)}")
             if page == 1:
@@ -537,12 +563,62 @@ class Portal:
             for r in got:
                 r["page_no"] = page
             rows += got
+            pages_walked = page
+            if page_size is None:
+                page_size = len(got)
             log(f"    page {page}: {len(got)} rows")
             if page >= max_pages:
                 log(f"    !! {max_pages} pages, stopping — window too wide")
                 break
             page += 1
+
+        self._reconcile(rows, pages_walked, page_size)
         return rows
+
+    def _reconcile(self, rows, pages_walked, page_size):
+        """Check what was swept against what the server said it had.
+
+        Doc 2026-057938 came back twice in one June window, on pages 8 and 9 —
+        one repeat in 1,168 rows. The duplicate itself is harmless: the tables
+        are append-only and the views take the latest observation per document.
+        The concern is the other half of the same defect. A paginated boundary
+        that can repeat a row can also SKIP one, and a skipped row is invisible
+        downstream — it looks exactly like a document the county never recorded,
+        which is absence stored as data (rule 3's failure mode, one level up).
+
+        `totalPages` arrived free with the searchPost, so this costs no extra
+        requests. Warnings are recorded rather than raised: unlike a result cap,
+        a mismatch does not mean the rows in hand are wrong, only that the window
+        may be short. `main` writes them into `run_log.notes` so the hole is
+        attributable to a window later.
+        """
+        self.sweep_warnings = []
+
+        seen, dupes = set(), []
+        for r in rows:
+            if r["doc_number"] in seen:
+                dupes.append(r["doc_number"])
+            seen.add(r["doc_number"])
+        if dupes:
+            shown = ", ".join(sorted(set(dupes))[:5])
+            self.sweep_warnings.append(f"DUPLICATE_ROWS: {len(set(dupes))} doc(s) returned more than once ({shown})")
+
+        if self.total_pages:
+            if pages_walked != self.total_pages:
+                self.sweep_warnings.append(
+                    f"PAGE_COUNT_MISMATCH: walked {pages_walked} page(s), server reported {self.total_pages}"
+                )
+            elif page_size and len(rows) <= page_size * (self.total_pages - 1):
+                # Every page but the last should be full. Falling at or below
+                # what n-1 full pages would hold means the walk lost rows at a
+                # boundary, even though it visited every page.
+                self.sweep_warnings.append(
+                    f"ROW_COUNT_SHORT: {len(rows)} rows across {self.total_pages} page(s) of {page_size}; "
+                    "at least one row was dropped at a page boundary"
+                )
+
+        for w in self.sweep_warnings:
+            log(f"    !! {w}")
 
     def detail(self, detail_id):
         # Detail views are real page loads, not XHR — navigate to them.
@@ -687,21 +763,54 @@ def _mmddyyyy_sort_key(v):
     return (y, m, d)
 
 
-def report_sections(con, days=7, limit=40):
+def _us(d):
+    """Render a date the way the portal does, so report text and stored
+    `recording_date` values read in the same format."""
+    return d.strftime("%m/%d/%Y")
+
+
+def report_sections(con, days=7, limit=40, today=None):
     """The §7 output: Section A (coming up) and Section B (just closed).
 
     This is what the product is for — everything below it in report() is
     diagnostics. Unavailable fields are printed as unavailable rather than
     omitted, per §7: a silently dropped field reads as "checked and empty".
+
+    `days` bounds Section A to notices recorded in the last `days` days,
+    inclusive of `today`; 0 means no bound. It used to appear in the header and
+    nowhere else, so a run over June data printed "last 7 days" above notices
+    spanning the whole month — invisible on a three-day database and a false
+    claim once Phase 4's backfill lands. A notice excluded by the bound is
+    COUNTED and reported, never silently dropped: the whole point of §7's
+    unavailable-not-omitted rule is that the reader can tell what was not shown.
+
+    `today` is injectable so the bound is testable without freezing the clock.
     """
+    today = today or date.today()
+    cutoff = today - timedelta(days=days - 1) if days else None
+    scope = "all notices collected" if cutoff is None else f"notices recorded {_us(cutoff)} to {_us(today)}"
+
     print("\n" + "=" * 72)
-    print(f"SECTION A — COMING UP FOR AUCTION   (notices recorded, last {days} days)")
+    print(f"SECTION A — COMING UP FOR AUCTION   ({scope})")
     print("=" * 72)
 
-    rows = [r for r in con.execute("SELECT doc_number, recording_date, grantors FROM v_upcoming")]
-    rows.sort(key=lambda r: _mmddyyyy_sort_key(r[1]), reverse=True)
+    collected = [r for r in con.execute("SELECT doc_number, recording_date, grantors FROM v_upcoming")]
+    collected.sort(key=lambda r: _mmddyyyy_sort_key(r[1]), reverse=True)
+    if cutoff is None:
+        rows, hidden = collected, 0
+    else:
+        floor = (cutoff.year, cutoff.month, cutoff.day)
+        # An unreadable or missing recording date sorts to (0,0,0) and would be
+        # dropped by the bound. Keep it: it prints as "unavailable", which is a
+        # visible gap, whereas excluding it would silently shrink the list.
+        rows = [r for r in collected if _mmddyyyy_sort_key(r[1]) >= floor or _mmddyyyy_sort_key(r[1]) == (0, 0, 0)]
+        hidden = len(collected) - len(rows)
     if not rows:
-        print("  (no notices of trustee's sale collected yet)")
+        if collected:
+            print(f"  (no notices recorded in this window. {len(collected)} older notice(s) are")
+            print("   in the database — re-run with --report-days 0 to see them all.)")
+        else:
+            print("  (no notices of trustee's sale collected yet)")
     else:
         # NOT labelled "owner". Live data (June 2026) shows the grantor list
         # carries the foreclosure TRUSTEE alongside the homeowner — e.g.
@@ -718,6 +827,9 @@ def report_sections(con, days=7, limit=40):
             print(f"  {dn:14s} {(rd or 'unavailable'):11s} {'unavailable':13s} {parties}")
         if len(rows) > limit:
             print(f"  ... and {len(rows) - limit} more")
+    if hidden:
+        print(f"\n  {hidden} further notice(s) are in the database, recorded before {_us(cutoff)} and")
+        print("  therefore outside this window. Re-run with --report-days 0 for all of them.")
     print("\n  Address and APN: UNAVAILABLE — not present anywhere in the recorder")
     print("  index or detail views (MVP.md §6.3).")
     print("  PARTIES is the raw grantor list from the grantor/grantee index, and it")
@@ -728,8 +840,8 @@ def report_sections(con, days=7, limit=40):
     print("  finding aid only, not a substitute for a title search.")
     print("  Auction date: UNAVAILABLE — the index carries the notice's recording")
     print("  date, not the sale date.")
-    print("  WARNING: rescissions and cancellations are collected but not yet joined")
-    print("  out of this list (ROADMAP Phase 3), so some of these sales will not")
+    print("  WARNING: rescissions of default are collected but not yet joined out of")
+    print("  this list (ROADMAP Phase 3), so some of these sales will not")
     print("  happen. Sales are also postponed by spoken announcement at the auction,")
     print("  which never reaches the recorder at all — no amount of collection")
     print("  catches those.")
@@ -761,8 +873,8 @@ def report_sections(con, days=7, limit=40):
     print("=" * 72)
 
 
-def report(con):
-    report_sections(con)
+def report(con, days=7):
+    report_sections(con, days=days)
     print("\n" + "=" * 68)
     print("DIAGNOSTICS")
     n_i = con.execute("SELECT COUNT(DISTINCT doc_number) FROM index_obs").fetchone()[0]
@@ -807,6 +919,10 @@ def report(con):
         flag = ""
         if notes and notes.startswith("RESULT_CAP"):
             flag = "  << INCOMPLETE (capped)"
+        elif notes and any(m in notes for m in ("PAGE_COUNT_MISMATCH", "ROW_COUNT_SHORT")):
+            # Not proof of a hole, but the only evidence there would ever be:
+            # a row lost at a page boundary leaves nothing else behind.
+            flag = "  << SUSPECT (swept fewer rows than the server reported)"
         elif ri == 0:
             flag = "  << zero rows"
         ri_s = "-" if ri is None else str(ri)
@@ -843,6 +959,12 @@ def main():
     ap.add_argument("--delay", type=float, default=1.5)
     ap.add_argument("--limit-details", type=int, default=0, help="0 = no limit")
     ap.add_argument("--report", action="store_true", help="read the DB, no network")
+    ap.add_argument(
+        "--report-days",
+        type=int,
+        default=7,
+        help="Section A shows notices recorded in the last N days (default 7). 0 shows every notice collected.",
+    )
     ap.add_argument("--debug", action="store_true", help="dump raw responses to ./debug")
     ap.add_argument(
         "--allow-zero-rows",
@@ -853,9 +975,12 @@ def main():
     )
     args = ap.parse_args()
 
+    if args.report_days < 0:
+        sys.exit("--report-days must be >= 0 (0 means no date bound)")
+
     con = db_open()
     if args.report:
-        report(con)
+        report(con, days=args.report_days)
         return
 
     if sync_playwright is None:
@@ -863,14 +988,15 @@ def main():
 
     start = date.fromisoformat(args.start)
     end = date.fromisoformat(args.end)
-    # --types is no longer used to build a query: the server discards the
-    # doc-type filter, so there is one unfiltered sweep per window and selection
-    # happens against KEEP_DOCTYPES. The flag is retained so existing invocations
-    # keep working, but it is reported as inert rather than silently ignored.
+    # --types is no longer used to build a query: collection runs ONE unfiltered
+    # sweep per window and selects against KEEP_DOCTYPES, so nothing consults
+    # this flag. It is retained so existing invocations keep working, but it is
+    # reported as inert rather than silently ignored. See Portal.search on why
+    # the sweep is unfiltered.
     if args.types and args.types != "TDUS,NOTS":
         log(
-            f"note: --types {args.types!r} does not affect the query — the portal "
-            "ignores the doc-type filter. Selection uses KEEP_DOCTYPES."
+            f"note: --types {args.types!r} does not affect the query — every sweep "
+            "is unfiltered. Selection uses KEEP_DOCTYPES."
         )
 
     with sync_playwright() as p:
@@ -961,6 +1087,10 @@ def main():
             store_index(con, keep, qs, qe)
 
             note = f"swept={len(rows)}; kept={len(keep)}; mix={mix}"
+            # Pagination warnings belong in run_log, not just the console: they
+            # are the only record that a given window may be short a row.
+            if portal.sweep_warnings:
+                note += "; " + "; ".join(portal.sweep_warnings)
             if args.no_detail:
                 run_log_finish(con, run_id, len(keep), 0, note + "; --no-detail")
                 continue
@@ -983,7 +1113,7 @@ def main():
             run_log_finish(con, run_id, len(keep), n_ok, note)
         ctx.close()
 
-    report(con)
+    report(con, days=args.report_days)
 
     # A capped window means the dataset has a known hole. Exit non-zero so a
     # caller (or the agent pipeline) cannot mistake this run for a clean one.
