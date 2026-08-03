@@ -7,23 +7,28 @@
 #                   (e.g. 2026-07-29-0600)
 #   PIPELINE_DATE — "YYYY-MM-DD", for anything still scoped to a calendar day
 #
-# Slots: 00,06,12,18 :00 — a 6-hour stride, 4 runs/day.
+# Slots: one per calendar day — a 24-hour stride, so PIPELINE_ID is always
+# "YYYY-MM-DD-0000".
 #
-# Why 6h and not the 2h the chess-annotator pipeline uses: this repo is ~800
-# lines with 23 open roadmap items and a human-gated blocker at its centre
-# (ROADMAP Phase 1's automation question, which no agent can resolve). At 12
-# cycles/day the roadmap is exhausted inside a week and the architect starts
-# inventing work to fill slots — which on a codebase with no ground truth is
-# actively harmful. 4 cycles/day keeps the queue fed without manufacturing
-# scope. Raise STRIDE_HOURS once collection is unblocked and there is real data
-# to iterate against.
+# Why daily and not the 2h the chess-annotator pipeline uses, or the 6h this
+# pipeline was originally written for: this repo is ~1000 lines with a couple of
+# dozen open roadmap items, several of them `[human]`-gated (a phone call to the
+# Recorder, a headed CAPTCHA session, reading the portal terms) that no agent can
+# resolve. Cycles do not create roadmap items; they consume them. At 4 cycles/day
+# the queue empties inside a week and the architect starts inventing work to fill
+# slots — actively harmful on a codebase with almost no ground truth to catch a
+# bad change. One cycle/day matches the rate at which real work actually appears
+# here, which is roughly "whatever a human noticed since yesterday" plus whatever
+# is open on GitHub. Raise STRIDE_HOURS only if slots start going hungry with
+# genuine work still queued.
 #
-# Constraint: all four phases of a run must fire within the SAME slot. Sequential
-# chaining completes a typical run in well under an hour, and the fallback cron
-# offsets (+30/+60/+90 min) are all < 360 min, so they resolve to the same slot
-# as the primary and the idempotency guards still correlate them.
+# Constraint: all four phases of a run must fire within the SAME slot, so the
+# idempotency guards correlate them. At a 24-hour stride that is automatic for
+# anything firing on the same calendar day — the fallback offsets (+30/+60/+90
+# min after a 03:10 primary) cannot cross midnight. The one thing that WOULD
+# break it is scheduling the primary near 23:00, so do not.
 
-STRIDE_HOURS="${STRIDE_HOURS:-6}"
+STRIDE_HOURS="${STRIDE_HOURS:-24}"
 
 # Honor a caller-provided PIPELINE_ID (hermetic tests pinning a fixed slot, or a
 # downstream phase reusing the slot its parent chose). Compute from the wall

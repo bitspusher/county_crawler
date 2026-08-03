@@ -359,17 +359,41 @@ Kept here so they are not drifted into. Full reasoning in §9.
 - Homeowner-facing product — different company, different face. Do not build both.
 - Multi-county expansion — eased by the Eagle pattern, but §7.3's thin volume may make
   it a precondition rather than an extension.
-- **The agent pipeline** (`.claude/agents/`, `scripts/*-review.sh`,
-  `implement.sh`, `crontab.txt`) — built 2026-07-29, deliberately NOT
-  scheduled. Cron stays uninstalled until (a) the Phase 0 items are done,
-  (b) `[human]`-tag enforcement is more than prompt-only (the protected-path
-  deny-list shipped 2026-07-29 and is no longer a pending condition), and
-  (c) the roadmap carries at least 6 open `[pipeline]`-tagged items spanning
-  at least two phases — checkable against the checkboxes, so enablement cannot
-  self-certify. Until then, run phases manually per-session.
+- ~~**The agent pipeline**~~ — **UNPARKED AND SCHEDULED 2026-08-02**, daily, by
+  founder decision. Recorded here rather than quietly deleted, because two of
+  the three enable conditions were **not met** and someone reading this later
+  should know that was a choice, not an oversight.
+
+  The original gate: (a) Phase 0 items done, (b) `[human]`-tag enforcement more
+  than prompt-only, (c) ≥6 open `[pipeline]` items across ≥2 phases.
+  At the time of enabling — (a) **UNMET**, all six Phase 0 boxes still
+  unchecked; (b) **UNMET**, the protected-path deny-list ships but tag
+  enforcement is still only the architect's prompt; (c) roughly met, ~4–5 open
+  `[pipeline]` items across four phases.
+
+  What that leaves exposed, and what to watch:
+  - Nothing mechanical stops the architect from speccing a `[human]` item. The
+    prompt forbids it; a prompt is not a check. **Read the decisions document.**
+  - Phase 0 is still the highest-information work in this plan and no agent can
+    do any of it. A daily pipeline generating code does not make the Recorder
+    call happen, and it can create the *feeling* of progress that delays it.
+  - Cadence is the mitigation for both. Daily, not the 4×/day the fragment was
+    written for, because cycles consume roadmap items rather than creating them;
+    an over-fed pipeline invents work, which on a codebase with almost no ground
+    truth is worse than an idle one. See `scripts/pipeline_id.sh`.
+
+  The pipeline now also triages **open GitHub issues** alongside the nightly
+  findings. It is READ-ONLY against GitHub — it may spec an issue, never comment
+  on or close one. This repo is public and an unattended wrong close cannot be
+  un-sent.
+
+  It does NOT touch the county portal: it reviews code, writes specs,
+  implements, and reviews diffs. `collect_sjc.py` is never invoked from cron, so
+  §10's "review the terms before automating" gate — which is about automating
+  collection — is untouched. **Collection stays manual and human-run.**
   *(2026-07-29 review: the machinery outsizes the stated MVP deliverable and
   lived entirely outside this priority document — recorded here so it is
-  accounted for.)*
+  accounted for. That observation still stands.)*
 
 ## Named mistakes not to make
 

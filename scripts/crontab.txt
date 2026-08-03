@@ -1,4 +1,4 @@
-# county_crawler — Agent Pipeline (every 6 hours)
+# county_crawler — Agent Pipeline (once a day)
 # System timezone: America/Los_Angeles (PST/PDT)
 #
 # ⚠️  DO NOT RUN `crontab scripts/crontab.txt`.
@@ -22,51 +22,76 @@
 #       crontab -l | grep -v county_crawler | crontab -
 #
 # ── Cadence ───────────────────────────────────────────────────────────
-# Slots: 00,06,12,18 (see scripts/pipeline_id.sh — STRIDE_HOURS=6).
-# Entries fire at 03,09,15,21 — deliberately OFFSET from the chess pipeline's
-# even-hour slots so the two do not start simultaneously and compete for the
-# same rolling Claude quota. Each project has its own .pipeline.lock, so flock
-# will NOT serialize them for you; the offset is the only thing that does.
+# ONE slot per calendar day (see scripts/pipeline_id.sh — STRIDE_HOURS=24), so
+# PIPELINE_ID is "YYYY-MM-DD-0000" and all four phases of a day correlate
+# automatically.
+#
+# Entries fire at :10 and :40 past the hour, deliberately OFF the chess
+# pipeline's grid. That pipeline occupies :00 and :30 of EVERY hour — even hours
+# from `0 */2` and `30 */2`, odd hours from `0 1-23/2` and `30 1-23/2` — so any
+# :00 or :30 entry here would start simultaneously with one of its phases and
+# compete for the same rolling Claude quota. Each project has its own
+# .pipeline.lock, so flock will NOT serialize the two for you; the offset is the
+# only thing that does.
+#
+# 03:xx local: after the chess pipeline's 02:00 slot has typically finished, and
+# far from the 23:40 metrics snapshot.
 #
 # Slot arithmetic: a 03:00 firing computes slot 00, and its fallbacks at 03:30 /
 # 04:00 / 04:30 all resolve to slot 00 as well, so the idempotency guards
 # correlate them. Same pattern at 09→06, 15→12, 21→18.
 #
-# 4 cycles/day rather than the chess pipeline's 12, because this repo is ~800
-# lines with 23 open roadmap items and a human-gated blocker at its centre. At 12
-# cycles/day the roadmap is exhausted in a week and the architect starts
-# inventing work — actively harmful on a codebase with no ground truth.
+# 1 cycle/day rather than the chess pipeline's 12, because cycles CONSUME roadmap
+# items, they do not create them. This repo is ~1000 lines with a couple of dozen
+# open items, several `[human]`-gated in ways no agent can resolve. At 12
+# cycles/day the queue empties in a week and the architect starts inventing work
+# — actively harmful on a codebase with almost no ground truth to catch a bad
+# change. Daily matches the rate real work actually appears here: whatever a
+# human noticed since yesterday, plus whatever is open on GitHub.
 #
 # Phases chain sequentially (1→2→3→4); only Phase 1 needs an entry. The fallback
 # entries catch a broken chain, and the idempotency guards make them no-ops when
 # the chain already completed the phase.
 #
-# ── Before enabling any of this ────────────────────────────────────────
-# The probe question this gate originally named was SETTLED 2026-07-29. The
-# authoritative enable-gate is now ROADMAP.md's "Deliberately parked" entry for
-# the agent pipeline: (a) Phase 0 done, (b) [human]-tag enforcement beyond
-# prompt-only, (c) >=6 open [pipeline]-tagged items across >=2 phases. Do not
-# install this crontab until all three hold.
+# ── Enablement status ──────────────────────────────────────────────────
+# ENABLED 2026-08-02 by founder decision, at a daily cadence, with the ROADMAP
+# gate's conditions (a) and (b) still UNMET. See ROADMAP.md "Deliberately
+# parked" for what that means and what to watch. In short: nothing mechanical
+# stops the architect from speccing a `[human]`-tagged item, so the decisions
+# document needs a human's eye — daily rather than 4x/day is partly what makes
+# that reviewable.
+#
+# This pipeline does NOT touch the county portal. It reviews code, writes specs,
+# implements, and reviews diffs; `collect_sjc.py` is never invoked here. §10's
+# "review the terms before automating" gate is about automating COLLECTION and
+# does not bind this. Collection stays manual and human-run.
 
 # Cron runs with a minimal PATH. Commented out — see the warning above.
 # PATH=/home/san/.local/bin:/home/san/.nvm/versions/node/v25.9.0/bin:/usr/local/bin:/usr/bin:/bin
 
 # ── Primary: Phase 1 triggers the full chain ──────────────────────────
-0 3,9,15,21 * * *   /home/san/Workspaces/county_crawler/scripts/nightly-review.sh
+10 3 * * *          /home/san/Workspaces/county_crawler/scripts/nightly-review.sh
 
 # ── Fallbacks: catch up if chaining failed ────────────────────────────
-# +30/+60/+90 min after the primary; all resolve to the same slot.
-30 3,9,15,21 * * *  /home/san/Workspaces/county_crawler/scripts/architect-review.sh
-0 4,10,16,22 * * *  /home/san/Workspaces/county_crawler/scripts/implement.sh
-30 4,10,16,22 * * * /home/san/Workspaces/county_crawler/scripts/architect-post-review.sh
+# +30/+60/+90 min after the primary. All land on the same calendar day, so they
+# resolve to the same slot and the idempotency guards make them no-ops when the
+# chain already completed the phase.
+40 3 * * *          /home/san/Workspaces/county_crawler/scripts/architect-review.sh
+10 4 * * *          /home/san/Workspaces/county_crawler/scripts/implement.sh
+40 4 * * *          /home/san/Workspaces/county_crawler/scripts/architect-post-review.sh
 
 # ── Daily metrics snapshot ────────────────────────────────────────────
-# 23:40 local, to capture the full day. Appends one row to
+# 23:20 local, to capture the full day. Appends one row to
 # reviews/collection-metrics.jsonl. Off the phase grid; flock serializes it.
-40 23 * * *         /home/san/Workspaces/county_crawler/scripts/metrics-snapshot.sh
+# NOT 23:50 — the chess pipeline's own metrics snapshot holds that minute, and
+# these two run in different repos so flock will not keep them apart. NOT 23:00
+# or 23:30 either: those are on the chess phase grid. Anything after 23:00 is
+# also close enough to midnight that it must stay clear of the 00:xx rollover,
+# since PIPELINE_ID is now a calendar day.
+20 23 * * *         /home/san/Workspaces/county_crawler/scripts/metrics-snapshot.sh
 
 # ── Weekly compliance brief ───────────────────────────────────────────
-# Sundays 08:20 local. Deliberately off the :00/:30 grid. Report-only: emits no
+# Sundays 08:20 local. Deliberately off the chess pipeline's :00/:30 grid. Report-only: emits no
 # specs, so it never competes for an implementation slot. Covers the Phase 0
 # items that are phone calls and records requests rather than code.
 20 8 * * 0          /home/san/Workspaces/county_crawler/scripts/compliance-review.sh

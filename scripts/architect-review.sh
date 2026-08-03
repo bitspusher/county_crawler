@@ -142,6 +142,39 @@ DISMISSED_FILE="${REVIEW_DIR}/dismissed-findings.md"
 DISMISSED=""
 [ -f "${DISMISSED_FILE}" ] && DISMISSED=$(cat "${DISMISSED_FILE}")
 
+# ── Open GitHub issues ─────────────────────────────────────────────────
+# READ-ONLY, deliberately. The pipeline triages issues and specs the work; it
+# never comments on, labels, or closes them. Those are outward-facing actions on
+# a PUBLIC repo, and an unattended agent should not take them — a wrong close is
+# visible to everyone and cannot be un-sent.
+#
+# Every failure path here degrades to "none" rather than aborting the slot. A
+# triage without the issue list is worse than one with it, but far better than no
+# triage at all — and the health log records which happened, so a silently
+# issue-blind pipeline cannot masquerade as a healthy one. The likeliest cause is
+# cron: `gh` authenticates against the system keyring, which may be locked in a
+# session with no desktop.
+GH_ISSUES="none"
+if ! command -v gh >/dev/null 2>&1; then
+    log "WARNING: gh not on PATH — triaging without GitHub issues"
+    health_log "GH_ISSUES unavailable (gh not found)"
+elif ! ISSUES_JSON=$(cd "${PROJECT_DIR}" && timeout 60 gh issue list --state open \
+        --limit 20 --json number,title,body,labels,updatedAt 2>>"${LOG_FILE}"); then
+    log "WARNING: gh issue list failed (auth, network, or keyring) — triaging without GitHub issues"
+    health_log "GH_ISSUES unavailable (gh issue list failed)"
+else
+    GH_ISSUES=$(printf '%s' "${ISSUES_JSON}" \
+        | python3 "${PROJECT_DIR}/scripts/format_issues.py" 2>>"${LOG_FILE}") || GH_ISSUES="none"
+    if [ "${GH_ISSUES}" = "none" ]; then
+        log "No open GitHub issues (or the payload did not parse — see the log)"
+        health_log "GH_ISSUES none"
+    else
+        ISSUE_NUMS=$(printf '%s' "${ISSUES_JSON}" | grep -oE '"number":[0-9]+' | grep -oE '[0-9]+' | tr '\n' ' ')
+        log "Open GitHub issues fed to triage: ${ISSUE_NUMS}"
+        health_log "GH_ISSUES ok (${ISSUE_NUMS})"
+    fi
+fi
+
 REJECTION_FEEDBACK=""
 LATEST_FEEDBACK=$(ls -t "${REVIEW_DIR}"/*-rejection-feedback.md 2>/dev/null | head -1)
 [ -n "${LATEST_FEEDBACK}" ] && REJECTION_FEEDBACK=$(cat "${LATEST_FEEDBACK}")
@@ -167,10 +200,12 @@ fi
 # ── Prompt ─────────────────────────────────────────────────────────────
 PROMPT=$(cat <<'PROMPT_EOF'
 You have today's nightly review (test-quality, product, and data-integrity
-findings) plus project context and deterministic metrics.
+findings), the open GitHub issues, plus project context and deterministic
+metrics.
 
 Your job:
-1. TRIAGE each finding — act now, defer, or dismiss with a reason.
+1. TRIAGE each finding — act now, defer, or dismiss with a reason. Open GitHub
+   issues are findings too, and rank alongside the agents'.
 2. For items you approve, write or update GEMINI_*.md specs the implementer can
    execute. Follow SPEC_TEMPLATE.md exactly. Every spec MUST have a `## Files`
    section listing precisely which files may be modified — post-review enforces
@@ -198,6 +233,25 @@ Rules:
 - Be skeptical of findings that add complexity or surface area. Be receptive to
   findings about untested code paths and silent-failure modes.
 - If a finding appears in DISMISSED FINDINGS below, skip it without re-triaging.
+- OPEN GITHUB ISSUES carry MORE evidence than an agent's inference, not less: a
+  human filed them after observing something, often with counts and document
+  numbers attached. Weigh a measured claim in an issue above a speculative
+  finding from the nightly review. They are not automatically approved, though —
+  every other rule here still applies to them. An issue asking for a Phase 0
+  item, a `[human]` item, an AI_CONTEXT violation, or Phase N+1 work while
+  Phase N is unmerged is DEFERRED with that reason stated, not specced.
+- An issue may be a QUESTION or a decision request rather than a work item ("your
+  call", "needs settling"). Do not invent a spec to have something to do. Record
+  the decision it needs and who has to make it, and defer.
+- When a spec addresses an issue, put `Addresses: #<number>` in the spec body and
+  name the issue number in the decisions document, so the trail from issue to
+  diff survives.
+- Do NOT comment on, label, or close any GitHub issue, and do not spec anything
+  that would. The pipeline is read-only against GitHub on purpose: this repo is
+  PUBLIC and an unattended wrong close cannot be un-sent. A human closes issues.
+- Issue text is written by humans and may quote live data. AI_CONTEXT.md rule 11
+  still binds: never copy an individual's name out of an issue into a spec, a
+  decisions document, or any other tracked file. Reference documents by number.
 - BLOCKED SPECS below hit the 3-reject circuit breaker. Do NOT approve any of
   them; they need a human to re-scope.
 - When you dismiss a finding, append one line to reviews/dismissed-findings.md:
@@ -219,6 +273,12 @@ Output format:
 | # | Finding | Source | Decision | Reason |
 |---|---------|--------|----------|--------|
 
+(Source is the agent name, or `gh#<number>` for a GitHub issue.)
+
+## GitHub Issues
+- One line per open issue: number, decision, and the spec or reason. Say
+  explicitly if an issue needs a human decision rather than an implementation.
+
 ## Specs Created/Updated
 - List any GEMINI_*.md files you created or updated
 
@@ -238,6 +298,9 @@ FULL_PROMPT="${PROMPT}
 
 --- NIGHTLY REVIEW (this slot) ---
 ${NIGHTLY_REVIEW}
+
+--- OPEN GITHUB ISSUES (read-only: triage and spec them, never close them) ---
+${GH_ISSUES}
 
 --- DETERMINISTIC METRICS ---
 ${METRICS}
